@@ -71,7 +71,7 @@ if __name__ == "__main__":
         # print(obs)
         frame = env.render().copy()
         x_pix, y_pix = world_to_image(obs['poses_x'][0], obs['poses_y'][0], image_height=frame.shape[0])
-        cv2.circle(frame, (int(frame.shape[1] / 2), int(frame.shape[0] / 2) - 10), 10, (0, 255, 0), -1)
+        # cv2.circle(frame, (int(frame.shape[1] / 2), int(frame.shape[0] / 2) - 10), 10, (0, 255, 0), -1)
         frames.append(frame)
 
         if done:
