@@ -139,7 +139,7 @@ def main():
     track.raceline.render_waypoints(env.unwrapped.renderer)
 
     ego_index = random.randint(0, len(track.raceline.xs) - 1)
-    opp_index = (ego_index + random.randint(5, 7)) % len(track.raceline.xs)
+    opp_index = (ego_index + random.randint(10, 20)) % len(track.raceline.xs)
     print('Ego index:', ego_index, 'Opp index:', opp_index)
     initial_pose = np.array([[track.raceline.xs[ego_index], track.raceline.ys[ego_index], track.raceline.yaws[ego_index]], [track.raceline.xs[opp_index], track.raceline.ys[opp_index], track.raceline.yaws[opp_index]]])
     obs, _ = env.reset(options={"poses": initial_pose})
@@ -155,7 +155,9 @@ def main():
         pred_opp_traj = p_future.result().pred_opp_traj
         pred_opp_traj_cli.get_logger().info(f'Get Pred Opp Trajectory: {len(pred_opp_traj.detections)}')
 
-        mode = select_mode(pred_opp_traj, obs)
+        mode = 0
+        if len(pred_opp_traj.detections) != 0:
+            mode = select_mode(pred_opp_traj, obs)
 
         ed_future = ego_drive_cli.send_request(obs, pred_opp_traj, mode)
         rclpy.spin_until_future_complete(ego_drive_cli, ed_future)

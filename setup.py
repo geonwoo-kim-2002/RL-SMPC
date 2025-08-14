@@ -22,6 +22,7 @@ setup(
             'service = rl_switching_mpc.server_test:main',
             'client = rl_switching_mpc.client_test:main',
             'run_gym = rl_switching_mpc.run_gym:main',
+            'training = rl_switching_mpc.training:main',
         ],
     },
 )
