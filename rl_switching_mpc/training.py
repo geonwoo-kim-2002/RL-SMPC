@@ -457,11 +457,12 @@ class MyF1TenthEnv(gym.Env, Node):
         return self.f1_env.render()
 
 class RewardLoggingCallback(BaseCallback):
-    def __init__(self, save_path="reward_history", rl_name='dqn', verbose=0):
+    def __init__(self, save_path="reward_history", rl_name='', verbose=0):
         super().__init__(verbose)
         self.save_path = save_path
         self.rl_name = rl_name
-        self.rewards = []
+        self.episode_rewards = []
+        self.current_rewards = 0.
 
     def _on_step(self) -> bool:
         # 현재 스텝의 reward 저장
@@ -471,11 +472,23 @@ class RewardLoggingCallback(BaseCallback):
         if reward is not None:
             self.current_rewards += reward[0]
 
+        if done is not None and done[0]:
+            # 에피소드 종료 → 현재 reward 기록
+            self.episode_rewards.append(self.current_rewards)
+            if self.verbose > 0:
+                print(f"Episode {len(self.episode_rewards)} reward: {self.current_rewards}")
+
+            self.current_rewards = 0.0
+
         return True  # 계속 학습
 
     def _on_training_end(self) -> None:
         # 학습 종료 시 저장
-        self.current_rewards = 0.0
+        rewards_array = np.array(self.episode_rewards)
+        name = self.save_path + '_' + self.rl_name + '_' + str(time.time()) + '.npy'
+        np.save(name, rewards_array)
+        if self.verbose > 0:
+            print(f"Saved rewards to {name}")
 
 def main():
     rclpy.init()
