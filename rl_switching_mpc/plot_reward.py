@@ -4,10 +4,10 @@ import glob
 import os
 
 # 모든 rewards*.npy 파일 찾기
-files = glob.glob("models/rewards*.npy")
+files = glob.glob("models/rewards_re_ppo_*.npy")
 
 # time 값 기준으로 정렬 (파일명 뒤의 숫자 기준)
-files.sort(key=lambda x: float(os.path.splitext(os.path.basename(x))[0].replace("rewards", "")))
+files.sort(key=lambda x: float(os.path.splitext(os.path.basename(x))[0].replace("rewards_re_ppo_", "")))
 
 all_rewards = []
 
