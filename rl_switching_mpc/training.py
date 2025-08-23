@@ -1,27 +1,27 @@
-import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 from f1tenth_gym.envs.f110_env import F110Env, Track
 
 import rclpy
 from rclpy.node import Node
-
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from pred_msgs.msg import Detection, DetectionArray
 from rl_switching_mpc_srv.srv import PredOppTraj, Drive
-from transforms3d import euler
-import random
-from rl_switching_mpc.Spline import Spline, Spline2D
-import pandas as pd
-from stable_baselines3 import PPO, DQN, SAC
-from sb3_contrib import RecurrentPPO
-import pathlib
-from stable_baselines3.common.callbacks import CheckpointCallback, EvalCallback
+
 import cv2
-from moviepy import ImageSequenceClip
 import time
-from stable_baselines3.common.callbacks import BaseCallback
+import random
+import pathlib
+import numpy as np
+import pandas as pd
+from transforms3d import euler
+from moviepy import ImageSequenceClip
+from rl_switching_mpc.Spline import Spline2D
+
+from sb3_contrib import RecurrentPPO
+from stable_baselines3 import PPO, DQN, SAC
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 
 class PredOppTrajClient(Node):
     def __init__(self):
@@ -138,16 +138,26 @@ class MyF1TenthEnv(gym.Env, Node):
         self.sp = Spline2D(center_path['x_m'], center_path['y_m'])
         print("track length:", self.sp.s[-1])
         self.width_info = pd.read_csv(f'{path}_width_info.csv')
+        self.max_width = max(max(self.width_info['left']), max(self.width_info['right']))
+        self.min_width = min(min(self.width_info['left']), min(self.width_info['right']))
+
+        self.max_curvature = 0.0
+        self.min_curvature = 1000.0
+        for i in range(int(self.sp.s[-1] * 100)):
+            curr_curvature = self.sp.calc_curvature(i / 100.0)
+            self.max_curvature = max(self.max_curvature, abs(curr_curvature))
+            self.min_curvature = min(self.min_curvature, abs(curr_curvature))
 
         self.horizon = 40
-        obs_dim = 4 + 4 + 3 * self.horizon + 2 * self.horizon + 5 + 1 + 1 # ego state, opp traj, track, last 5 action, collision, overtaking
+        obs_dim = 4 + 4 + 2 * self.horizon + 2 * self.horizon + 1 + 1 # ego state, opp state, opp traj var, track, collision, overtaking
+        # obs_dim = 4 + 4 + 3 * self.horizon + 2 * self.horizon + 5 + 1 + 1 # ego state, opp state, opp traj var, track, last 5 action, collision, overtaking
         # obs_dim = 4 + 8 * self.horizon + 2 * self.horizon + 1 + 1 + 1 # ego state, opp traj, track, mpc solved, collision, overtaking
         # obs_dim = 4 + 8 * self.horizon + 2 * self.horizon + 1 + 1 + 1 + 5 # ego state, opp traj, track, mpc solved, collision, overtaking, action change flag
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Discrete(3)
         # self.action_space = spaces.Box(low=0.0, high=3.0, shape=(1,), dtype=np.float32)
-        # self.last_action = 0
-        self.last_action = [0, 0, 0, 0, 0]
+        self.last_action = 0
+        # self.last_action = [0, 0, 0, 0, 0]
         self.action_count = 0
         # self.action_change_flag = [0, 0, 0, 0, 0]
         self.init_s = 0.
@@ -167,8 +177,8 @@ class MyF1TenthEnv(gym.Env, Node):
         initial_pose = np.array([[self.track.centerline.xs[ego_index], self.track.centerline.ys[ego_index], self.track.centerline.yaws[ego_index]], [self.track.centerline.xs[opp_index], self.track.centerline.ys[opp_index], self.track.centerline.yaws[opp_index]]])
         self.obs, info = self.f1_env.reset(options={"poses": initial_pose})
         self.reset_collections = True
-        # self.last_action = 0
-        self.last_action = [0, 0, 0, 0, 0]
+        self.last_action = 0
+        # self.last_action = [0, 0, 0, 0, 0]
         self.action_count = 0
         # self.action_change_flag = [0, 0, 0, 0, 0]
         self.init_s = self.sp.find_s(self.obs['poses_x'][0], self.obs['poses_y'][0])
@@ -183,10 +193,9 @@ class MyF1TenthEnv(gym.Env, Node):
         return self._combine_obs(self.obs, DetectionArray(), done=False), info
         # return np.concatenate([self._combine_obs(self.obs, DetectionArray(), done=False, mpc_solved=False), np.array(self.action_change_flag, dtype=np.float32)]), info
 
-    def step(self, action):
+    def step(self, action_value):
         # print("action:", action)
-        action = int(action)
-        # action = 1
+        action = int(action_value)
         # action_value = float(action_value[0])
         # if 0.0 <= action_value < 1.0:
         #     action = 0
@@ -239,18 +248,23 @@ class MyF1TenthEnv(gym.Env, Node):
 
         obs = self._combine_obs(self.obs, pred_opp_traj, done)
         # reward = action * -0.05
+        # reward = -self.lap_count
         reward = 0.0
-        if self.action_count >= 1 and action != self.last_action[-1]:
-            reward -= 2.0
-            self.action_count = 1
-        elif action != self.last_action[-1]:
-            self.action_count = 1
-        elif self.action_count == 3:
-            self.action_count = 0
-        elif self.action_count >= 1:
-            self.action_count += 1
-        self.last_action.pop(0)
-        self.last_action.append(action)
+        # if self.action_count >= 1 and action != self.last_action[-1]:
+        #     reward -= 2.0
+        #     self.action_count = 1
+        # elif action != self.last_action[-1]:
+        #     self.action_count = 1
+        # elif self.action_count == 3:
+        #     self.action_count = 0
+        # elif self.action_count >= 1:
+        #     self.action_count += 1
+        # self.last_action.pop(0)
+        # self.last_action.append(action)
+
+        # if self.last_action != action:
+        #     reward -= 0.1
+        #     self.last_action = action
 
         # if obs[-3] == 0.0:  # mpc not solved
         #     reward -= 0.1
@@ -262,7 +276,7 @@ class MyF1TenthEnv(gym.Env, Node):
             var_avg += det.v_var
         var_avg /= (3 * len(pred_opp_traj.detections))
 
-        opp_s = 0.
+        opp_s = 0.0
         if action == 0:
             opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
             if opp_s - self.curr_s < -self.sp.s[-1] / 2:
@@ -271,37 +285,43 @@ class MyF1TenthEnv(gym.Env, Node):
                 opp_s -= self.sp.s[-1]
             reward -= (1 / (opp_s - self.curr_s + 1e-2)) * 1.34
         elif action == 1:
-            reward -= (1 / var_avg) * 0.05
+            reward -= (1 / var_avg) * 0.06
         elif action == 2:
             reward -= var_avg
 
         if obs[-2] == 1.0:  # collision
             print('Collision!')
-            solo_num = self.number_of_last_action(0)
-            acc_num = self.number_of_last_action(1)
-            overtake_num = self.number_of_last_action(2)
-            reward -= min(0.5 * solo_num + 0.5 * overtake_num, 0) + 1.0
+            # solo_num = self.number_of_last_action(0)
+            # acc_num = self.number_of_last_action(1)
+            # overtake_num = self.number_of_last_action(2)
+            # reward -= min(0.5 * solo_num + 0.5 * overtake_num, 0) + 1.0
+            reward -= 1.0
         elif obs[-1] == 1.0:  # success to overtake
             print('Overtaking success!')
-            reward = 0.7 * self.number_of_last_action(2)
+            # reward = 0.7 * self.number_of_last_action(2)
+            reward += 1.0
             done = True
 
         if self.lap_count >= 4:
             print('Reached 4 laps')
             truncated = True
+            # done = True
 
         # print(action_value, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count, 'ego s:', self.curr_s, 'opp s:', opp_s)
-        print(self.action_count, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count)
+        real_reward = reward
+        reward = max(reward, -10.0)
+        # reward = (reward + 3.5) / 6.5
+        print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
 
-        return obs, min(max(reward, -10.), 5.), done, truncated, info
+        return obs, reward, done, truncated, info
         # return np.concatenate([obs, np.array(self.action_change_flag, dtype=np.float32)]), reward, done, truncated, info
 
-    def number_of_last_action(self, action):
-        num = 0
-        for i in range(len(self.last_action)):
-            if self.last_action[i] == action:
-                num += 1
-        return num
+    # def number_of_last_action(self, action):
+    #     num = 0
+    #     for i in range(len(self.last_action)):
+    #         if self.last_action[i] == action:
+    #             num += 1
+    #     return num
 
     def _check_lap_complete(self):
         if self.prev_s - self.curr_s > self.sp.s[-1] / 2:
@@ -356,14 +376,14 @@ class MyF1TenthEnv(gym.Env, Node):
         ego_s = self.sp.find_s(obs['poses_x'][0], obs['poses_y'][0])
         ego_d = self.sp.calc_d(obs['poses_x'][0], obs['poses_y'][0], ego_s)
         ego_yaw = self.sp.calc_yaw(ego_s) - obs['poses_theta'][0]
-        ego_state = np.array([0.0, ego_d, ego_yaw, obs['linear_vels_x'][0]])
+        ego_state = np.array([0.0, (ego_d + self.max_width) / (2 * self.max_width), (ego_yaw + np.pi) / (2 * np.pi), obs['linear_vels_x'][0] / 10.0])
 
         # opp state
         if len(pred_opp_traj.detections) == 0:
             opp_s = self.sp.find_s(obs['poses_x'][1], obs['poses_y'][1])
             opp_d = self.sp.calc_d(obs['poses_x'][1], obs['poses_y'][1], opp_s)
             opp_yaw = self.sp.calc_yaw(opp_s) - obs['poses_theta'][1]
-            opp_state = np.array([opp_s - ego_s, opp_d, opp_yaw, obs['linear_vels_x'][1]])
+            opp_state = np.array([(opp_s - ego_s) / 7.0, (opp_d + self.max_width) / (2 * self.max_width), (opp_yaw + np.pi) / (2 * np.pi), obs['linear_vels_x'][1] / 10.0])
         else:
             opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
             opp_d = self.sp.calc_d(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y, opp_s)
@@ -372,10 +392,10 @@ class MyF1TenthEnv(gym.Env, Node):
                 opp_s += self.sp.s[-1]
             elif opp_s - ego_s > self.sp.s[-1] / 2:
                 opp_s -= self.sp.s[-1]
-            opp_state = np.array([opp_s - ego_s, opp_d, opp_yaw, pred_opp_traj.detections[0].v])
+            opp_state = np.array([(opp_s - ego_s) / 7.0, (opp_d + self.max_width) / (2 * self.max_width), (opp_yaw + np.pi) / (2 * np.pi), pred_opp_traj.detections[0].v / 10.0])
 
         # opp traj
-        opp_traj = np.zeros((self.horizon, 3))
+        opp_traj = np.zeros((self.horizon, 2))
         # track info
         track_info = np.zeros((self.horizon, 2))
         for i in range(len(pred_opp_traj.detections)):
@@ -393,30 +413,32 @@ class MyF1TenthEnv(gym.Env, Node):
             # opp_traj[i, 2] = opp_yaw
             # opp_traj[i, 3] = det.v
 
-            yaw_track = self.sp.calc_yaw(opp_s)
-            cos_y = np.cos(yaw_track)
-            sin_y = np.sin(yaw_track)
+            # yaw_track = self.sp.calc_yaw(opp_s)
+            # cos_y = np.cos(yaw_track)
+            # sin_y = np.sin(yaw_track)
 
-            # 공분산 행렬 (x, y)
-            cov_xy = np.array([[det.x_var, 0.0],
-                               [0.0, det.y_var]])
+            # # 공분산 행렬 (x, y)
+            # cov_xy = np.array([[det.x_var, 0.0],
+            #                    [0.0, det.y_var]])
 
-            # 회전변환 (R * cov_xy * R^T)
-            R = np.array([[cos_y, sin_y],
-                          [-sin_y, cos_y]])
-            cov_sd = R @ cov_xy @ R.T
+            # # 회전변환 (R * cov_xy * R^T)
+            # R = np.array([[cos_y, sin_y],
+            #               [-sin_y, cos_y]])
+            # cov_sd = R @ cov_xy @ R.T
 
-            s_var = cov_sd[0, 0]
-            d_var = cov_sd[1, 1]
+            # s_var = cov_sd[0, 0]
+            # d_var = cov_sd[1, 1]
 
             # opp_traj[i, 4] = s_var
             # opp_traj[i, 5] = d_var
             # opp_traj[i, 6] = det.yaw_var
             # opp_traj[i, 7] = det.v_var
-            opp_traj[i, 0] = s_var
-            opp_traj[i, 1] = d_var
+            # opp_traj[i, 0] = s_var
+            # opp_traj[i, 1] = d_var
             # opp_traj[i, 2] = det.yaw_var
-            opp_traj[i, 2] = det.v_var
+            # opp_traj[i, 2] = det.v_var
+            opp_traj[i, 0] = (det.x_var + det.y_var) / 2
+            opp_traj[i, 1] = det.v_var
 
             s = opp_s
             if s > self.sp.s[-1]:
@@ -426,10 +448,10 @@ class MyF1TenthEnv(gym.Env, Node):
             width_idx = round(s * 100)
             left_width = self.width_info['left'][width_idx]
             right_width = self.width_info['right'][width_idx]
-            track_info[i, 0] = min(left_width, right_width) * 10
+            track_info[i, 0] = min(left_width, right_width) / 3.0
             # track_info[i, 0] = left_width
             # track_info[i, 1] = right_width
-            track_info[i, 1] = pow(self.sp.calc_curvature(s) * 100, 2)
+            track_info[i, 1] = abs(self.sp.calc_curvature(s))
 
         # collision, overtaking
         collision = done
@@ -447,9 +469,13 @@ class MyF1TenthEnv(gym.Env, Node):
             opp_state.flatten(),
             opp_traj.flatten(),
             track_info.flatten(),
-            np.array(self.last_action, dtype=np.float32).flatten(),
             np.array([float(collision), float(overtaking)], dtype=np.float32)
         ])
+
+        # print('ego state:', ego_state)
+        # print('opp state:', opp_state)
+        # print('opp_traj:', opp_traj)
+        # print('track_info:', track_info)
 
         return state_vector
 
@@ -462,7 +488,9 @@ class RewardLoggingCallback(BaseCallback):
         self.save_path = save_path
         self.rl_name = rl_name
         self.episode_rewards = []
-        self.current_rewards = 0.
+        self.rewards = []
+        self.current_rewards = 0.0
+        self.step_count = 0
 
     def _on_step(self) -> bool:
         # 현재 스텝의 reward 저장
@@ -470,22 +498,30 @@ class RewardLoggingCallback(BaseCallback):
         done = self.locals.get("dones")
 
         if reward is not None:
+            self.rewards.append(reward[0])
             self.current_rewards += reward[0]
+            self.step_count += 1
 
-        if done is not None and done[0]:
+        if done is not None and done[0] and self.step_count > 50:
             # 에피소드 종료 → 현재 reward 기록
-            self.episode_rewards.append(self.current_rewards)
+            self.episode_rewards.append(self.current_rewards / self.step_count if self.step_count > 0 else 0.0)
             if self.verbose > 0:
                 print(f"Episode {len(self.episode_rewards)} reward: {self.current_rewards}")
 
             self.current_rewards = 0.0
+            self.step_count = 0
 
         return True  # 계속 학습
 
     def _on_training_end(self) -> None:
         # 학습 종료 시 저장
-        rewards_array = np.array(self.episode_rewards)
-        name = self.save_path + '_' + self.rl_name + '_' + str(time.time()) + '.npy'
+        curr_time = time.time()
+        episode_rewards_array = np.array(self.episode_rewards)
+        name = self.save_path + '_episode_' + self.rl_name + '_' + str(curr_time) + '.npy'
+        np.save(name, episode_rewards_array)
+
+        rewards_array = np.array(self.rewards)
+        name = self.save_path + '_' + self.rl_name + '_' + str(curr_time) + '.npy'
         np.save(name, rewards_array)
         if self.verbose > 0:
             print(f"Saved rewards to {name}")
@@ -502,38 +538,37 @@ def main():
     loaded_map = Track.from_track_path(map_yaml, scale)
     env = MyF1TenthEnv(loaded_map, vehicle_params,path)
 
-    rl_name = 'dqn'
+    rl_name = 're_ppo'
 
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
     eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
     reward_callback = RewardLoggingCallback(save_path="models/rewards", rl_name=rl_name, verbose=1)
 
-    # if rl_name == 'dqn':
-    #     # model = DQN("MlpPolicy", env, verbose=1)
-    #     model = DQN.load("models/re_ppo_f1tenth_model17", env=env)
-    # elif rl_name == 'ppo':
-    #     # model = PPO("MlpPolicy", env, verbose=1)
-    #     model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
-    # elif rl_name == 're_ppo':
-    #     # model = RecurrentPPO("MlpLstmPolicy", env, verbose=1)
-    #     model = RecurrentPPO.load("models/re_ppo_f1tenth_model39", env=env)
-    # elif rl_name == 'sac':
-    #     # model = SAC("MlpPolicy", env, verbose=1)
-    #     model = SAC.load("models/sac_f1tenth_model1", env=env)
+    if rl_name == 'dqn':
+        model = DQN("MlpPolicy", env, verbose=1)
+        # model = DQN.load("models/re_ppo_f1tenth_model17", env=env)
+    elif rl_name == 'ppo':
+        model = PPO("MlpPolicy", env, verbose=1)
+        # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
+    elif rl_name == 're_ppo':
+        model = RecurrentPPO("MlpLstmPolicy", env, verbose=1)
+        # model = RecurrentPPO.load("models/re_ppo_f1tenth_model39", env=env)
+    elif rl_name == 'sac':
+        model = SAC("MlpPolicy", env, verbose=1)
+        # model = SAC.load("models/sac_f1tenth_model1", env=env)
 
-    # episode = 2
-    # while True:
-    #     model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
-    #     # model.save("models/re_ppo_f1tenth_model" + str(episode))
-    #     model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
-    #     episode += 1
+    episode = 0
+    while True:
+        model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
+        model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
+        episode += 1
 
     if rl_name == 'dqn':
         model = DQN.load("models/dqn_f1tenth_model34")
     elif rl_name == 'ppo':
         model = PPO.load("models/ppo_f1tenth_model28")
     elif rl_name == 're_ppo':
-        model = RecurrentPPO.load("models/re_ppo_f1tenth_model39")
+        model = RecurrentPPO.load("models/re_ppo_f1tenth_model14")
     elif rl_name == 'sac':
         model = SAC.load("models/sac_f1tenth_model51")
 
@@ -578,7 +613,7 @@ def main():
         #     obs, info = env.reset()
         #     frames = [env.render().copy()]
 
-    clip = ImageSequenceClip(frames, fps=80)
+    clip = ImageSequenceClip(frames, fps=40)
     clip.write_videofile('videos/test_' + rl_name + '.mp4', codec='libx264', audio=False)
     env.pred_opp_traj_cli.destroy_node()
     env.ego_drive_cli.destroy_node()
