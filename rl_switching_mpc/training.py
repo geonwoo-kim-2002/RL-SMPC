@@ -15,6 +15,7 @@ import random
 import pathlib
 import numpy as np
 import pandas as pd
+from math import *
 from transforms3d import euler
 from moviepy import ImageSequenceClip
 from rl_switching_mpc.Spline import Spline2D
@@ -162,6 +163,7 @@ class MyF1TenthEnv(gym.Env, Node):
         # self.action_change_flag = [0, 0, 0, 0, 0]
         self.init_s = 0.
         self.lap_count = 0
+        self.reset_count = 5
 
         self.reset_collections = True
         self.pred_opp_traj_cli = PredOppTrajClient()
@@ -176,7 +178,6 @@ class MyF1TenthEnv(gym.Env, Node):
         print('Ego index:', ego_index, 'Opp index:', opp_index)
         initial_pose = np.array([[self.track.centerline.xs[ego_index], self.track.centerline.ys[ego_index], self.track.centerline.yaws[ego_index]], [self.track.centerline.xs[opp_index], self.track.centerline.ys[opp_index], self.track.centerline.yaws[opp_index]]])
         self.obs, info = self.f1_env.reset(options={"poses": initial_pose})
-        self.reset_collections = True
         self.last_action = 0
         # self.last_action = [0, 0, 0, 0, 0]
         self.action_count = 0
@@ -186,16 +187,28 @@ class MyF1TenthEnv(gym.Env, Node):
         self.curr_s = self.init_s
         self.lap_count = 0
 
-        ed_future = self.ego_drive_cli.send_request(self.obs, reset=True)
-        rclpy.spin_until_future_complete(self.ego_drive_cli, ed_future)
-        od_future = self.opp_drive_cli.send_request(self.obs, reset=True)
-        rclpy.spin_until_future_complete(self.opp_drive_cli, od_future)
+        if self.reset_count > 4:
+            self.reset_collections = True
+            ed_future = self.ego_drive_cli.send_request(self.obs, reset=True)
+            rclpy.spin_until_future_complete(self.ego_drive_cli, ed_future)
+            od_future = self.opp_drive_cli.send_request(self.obs, reset=True)
+            rclpy.spin_until_future_complete(self.opp_drive_cli, od_future)
+            self.reset_count = 0
+        else:
+            self.reset_collections = False
+            ed_future = self.ego_drive_cli.send_request(self.obs, reset=False)
+            rclpy.spin_until_future_complete(self.ego_drive_cli, ed_future)
+            od_future = self.opp_drive_cli.send_request(self.obs, reset=False)
+            rclpy.spin_until_future_complete(self.opp_drive_cli, od_future)
+            self.reset_count += 1
+
         return self._combine_obs(self.obs, DetectionArray(), done=False), info
         # return np.concatenate([self._combine_obs(self.obs, DetectionArray(), done=False, mpc_solved=False), np.array(self.action_change_flag, dtype=np.float32)]), info
 
     def step(self, action_value):
         # print("action:", action)
         action = int(action_value)
+        # action = 1
         # action_value = float(action_value[0])
         # if 0.0 <= action_value < 1.0:
         #     action = 0
@@ -263,7 +276,7 @@ class MyF1TenthEnv(gym.Env, Node):
         # self.last_action.append(action)
 
         # if self.last_action != action:
-        #     reward -= 0.1
+        #     reward -= 0.5
         #     self.last_action = action
 
         # if obs[-3] == 0.0:  # mpc not solved
@@ -277,17 +290,24 @@ class MyF1TenthEnv(gym.Env, Node):
         var_avg /= (3 * len(pred_opp_traj.detections))
 
         opp_s = 0.0
-        if action == 0:
-            opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
-            if opp_s - self.curr_s < -self.sp.s[-1] / 2:
-                opp_s += self.sp.s[-1]
-            elif opp_s - self.curr_s > self.sp.s[-1] / 2:
-                opp_s -= self.sp.s[-1]
-            reward -= (1 / (opp_s - self.curr_s + 1e-2)) * 1.34
-        elif action == 1:
-            reward -= (1 / var_avg) * 0.06
-        elif action == 2:
-            reward -= var_avg
+        opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
+        if opp_s - self.curr_s < -self.sp.s[-1] / 2:
+            opp_s += self.sp.s[-1]
+        elif opp_s - self.curr_s > self.sp.s[-1] / 2:
+            opp_s -= self.sp.s[-1]
+        dis = opp_s - self.curr_s
+
+        # if action == 0:
+        #     reward -= (1 / (opp_s - self.curr_s + 1e-2)) * 1.34
+        # elif action == 1:
+        #     reward -= (1 / var_avg) * 0.06
+        # elif action == 2:
+        #     reward -= var_avg
+
+        var_avg = max(min(var_avg, 0.3), 0.15)
+        dis = max(min(dis, 7.0), 0.0)
+        # reward += (-exp(pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.1, 2))) + 1) * 2
+        reward += (exp(-pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.01, 2)))) * 2
 
         if obs[-2] == 1.0:  # collision
             print('Collision!')
@@ -295,11 +315,13 @@ class MyF1TenthEnv(gym.Env, Node):
             # acc_num = self.number_of_last_action(1)
             # overtake_num = self.number_of_last_action(2)
             # reward -= min(0.5 * solo_num + 0.5 * overtake_num, 0) + 1.0
-            reward -= 1.0
+            reward -= 5.0
         elif obs[-1] == 1.0:  # success to overtake
             print('Overtaking success!')
             # reward = 0.7 * self.number_of_last_action(2)
-            reward += 1.0
+            if action == 2:
+                # reward += 2.0
+                reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
             done = True
 
         if self.lap_count >= 4:
@@ -308,10 +330,11 @@ class MyF1TenthEnv(gym.Env, Node):
             # done = True
 
         # print(action_value, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count, 'ego s:', self.curr_s, 'opp s:', opp_s)
-        real_reward = reward
-        reward = max(reward, -10.0)
+        # reward = max(reward, -10.0)
         # reward = (reward + 3.5) / 6.5
-        print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
+        # print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
+        print('action:', action_value, 'reward:', reward, 'lap count:', self.lap_count, 'var:', var_avg, 'dis:', dis, obs[-2], obs[-1])
+
 
         return obs, reward, done, truncated, info
         # return np.concatenate([obs, np.array(self.action_change_flag, dtype=np.float32)]), reward, done, truncated, info
@@ -526,6 +549,12 @@ class RewardLoggingCallback(BaseCallback):
         if self.verbose > 0:
             print(f"Saved rewards to {name}")
 
+def mask_fn(env) -> np.ndarray:
+    # Do whatever you'd like in this function to return the action mask
+    # for the current env. In this example, we assume the env has a
+    # helpful method we can rely on.
+    return env.f1_env.valid_action_mask()
+
 def main():
     rclpy.init()
 
@@ -566,9 +595,9 @@ def main():
     if rl_name == 'dqn':
         model = DQN.load("models/dqn_f1tenth_model34")
     elif rl_name == 'ppo':
-        model = PPO.load("models/ppo_f1tenth_model28")
+        model = PPO.load("models/ppo_f1tenth_model8")
     elif rl_name == 're_ppo':
-        model = RecurrentPPO.load("models/re_ppo_f1tenth_model14")
+        model = RecurrentPPO.load("models/re_ppo_f1tenth_model30")
     elif rl_name == 'sac':
         model = SAC.load("models/sac_f1tenth_model51")
 
