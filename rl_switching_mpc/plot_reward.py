@@ -3,15 +3,18 @@ import matplotlib.pyplot as plt
 import glob
 import os
 
-# 모든 rewards*.npy 파일 찾기
-files = glob.glob("models/rewards_episode_re_ppo_*.npy")
-# time 값 기준으로 정렬 (파일명 뒤의 숫자 기준)
-files.sort(key=lambda x: float(os.path.splitext(os.path.basename(x))[0].replace("rewards_episode_re_ppo_", "")))
+plot_episode = True
+mode = 'dqn'
+
+path = 'rewards_'
+if plot_episode:
+    path += 'episode_'
+path += mode
 
 # 모든 rewards*.npy 파일 찾기
-# files = glob.glob("models/rewards_re_ppo_*.npy")
-# # time 값 기준으로 정렬 (파일명 뒤의 숫자 기준)
-# files.sort(key=lambda x: float(os.path.splitext(os.path.basename(x))[0].replace("rewards_re_ppo_", "")))
+files = glob.glob('models/' + path + "_*.npy")
+# time 값 기준으로 정렬 (파일명 뒤의 숫자 기준)
+files.sort(key=lambda x: float(os.path.splitext(os.path.basename(x))[0].replace(path + "_", "")))
 
 all_rewards = []
 

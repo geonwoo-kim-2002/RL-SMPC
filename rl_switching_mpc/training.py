@@ -275,9 +275,9 @@ class MyF1TenthEnv(gym.Env, Node):
         # self.last_action.pop(0)
         # self.last_action.append(action)
 
-        # if self.last_action != action:
-        #     reward -= 0.5
-        #     self.last_action = action
+        if self.last_action != action:
+            reward -= 0.1
+            self.last_action = action
 
         # if obs[-3] == 0.0:  # mpc not solved
         #     reward -= 0.1
@@ -289,14 +289,17 @@ class MyF1TenthEnv(gym.Env, Node):
             var_avg += det.v_var
         var_avg /= (3 * len(pred_opp_traj.detections))
 
-        opp_s = 0.0
-        opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
-        if opp_s - self.curr_s < -self.sp.s[-1] / 2:
-            opp_s += self.sp.s[-1]
-        elif opp_s - self.curr_s > self.sp.s[-1] / 2:
-            opp_s -= self.sp.s[-1]
-        dis = opp_s - self.curr_s
+        # opp_s = 0.0
+        # opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
+        # if opp_s - self.curr_s < -self.sp.s[-1] / 2:
+        #     opp_s += self.sp.s[-1]
+        # elif opp_s - self.curr_s > self.sp.s[-1] / 2:
+        #     opp_s -= self.sp.s[-1]
+        # dis = opp_s - self.curr_s
 
+        ego_v = self.obs['linear_vels_x'][0]
+        opp_v = pred_opp_traj.detections[0].v
+        e_v = ego_v - opp_v
         # if action == 0:
         #     reward -= (1 / (opp_s - self.curr_s + 1e-2)) * 1.34
         # elif action == 1:
@@ -305,9 +308,11 @@ class MyF1TenthEnv(gym.Env, Node):
         #     reward -= var_avg
 
         var_avg = max(min(var_avg, 0.3), 0.15)
-        dis = max(min(dis, 7.0), 0.0)
+        # dis = max(min(dis, 7.0), 0.0)
+        e_v = max(min(e_v, 3.0), 0.0)
         # reward += (-exp(pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.1, 2))) + 1) * 2
-        reward += (exp(-pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.01, 2)))) * 2
+        # reward += (exp(-pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.01, 2)))) * 2
+        reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2 - 1
 
         if obs[-2] == 1.0:  # collision
             print('Collision!')
@@ -319,9 +324,9 @@ class MyF1TenthEnv(gym.Env, Node):
         elif obs[-1] == 1.0:  # success to overtake
             print('Overtaking success!')
             # reward = 0.7 * self.number_of_last_action(2)
-            if action == 2:
+            # if action == 2:
                 # reward += 2.0
-                reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
+            reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
             done = True
 
         if self.lap_count >= 4:
@@ -333,7 +338,7 @@ class MyF1TenthEnv(gym.Env, Node):
         # reward = max(reward, -10.0)
         # reward = (reward + 3.5) / 6.5
         # print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
-        print('action:', action_value, 'reward:', reward, 'lap count:', self.lap_count, 'var:', var_avg, 'dis:', dis, obs[-2], obs[-1])
+        print('action:', action_value, 'reward:', reward, 'lap count:', self.lap_count, 'var:', var_avg, 'e_v:', e_v)
 
 
         return obs, reward, done, truncated, info
@@ -567,7 +572,7 @@ def main():
     loaded_map = Track.from_track_path(map_yaml, scale)
     env = MyF1TenthEnv(loaded_map, vehicle_params,path)
 
-    rl_name = 're_ppo'
+    rl_name = 'dqn'
 
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
     eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
@@ -581,7 +586,7 @@ def main():
         # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
     elif rl_name == 're_ppo':
         model = RecurrentPPO("MlpLstmPolicy", env, verbose=1)
-        # model = RecurrentPPO.load("models/re_ppo_f1tenth_model39", env=env)
+        # model = RecurrentPPO.load("models/re_ppo_f1tenth_model5", env=env)
     elif rl_name == 'sac':
         model = SAC("MlpPolicy", env, verbose=1)
         # model = SAC.load("models/sac_f1tenth_model1", env=env)
