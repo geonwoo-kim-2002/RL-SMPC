@@ -276,7 +276,7 @@ class MyF1TenthEnv(gym.Env, Node):
         # self.last_action.append(action)
 
         if self.last_action != action:
-            reward -= 0.1
+            reward -= 1.0
             self.last_action = action
 
         # if obs[-3] == 0.0:  # mpc not solved
@@ -312,7 +312,7 @@ class MyF1TenthEnv(gym.Env, Node):
         e_v = max(min(e_v, 3.0), 0.0)
         # reward += (-exp(pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.1, 2))) + 1) * 2
         # reward += (exp(-pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.01, 2)))) * 2
-        reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2 - 1
+        reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2
 
         if obs[-2] == 1.0:  # collision
             print('Collision!')
@@ -320,13 +320,13 @@ class MyF1TenthEnv(gym.Env, Node):
             # acc_num = self.number_of_last_action(1)
             # overtake_num = self.number_of_last_action(2)
             # reward -= min(0.5 * solo_num + 0.5 * overtake_num, 0) + 1.0
-            reward -= 5.0
+            reward = -20.0
         elif obs[-1] == 1.0:  # success to overtake
             print('Overtaking success!')
             # reward = 0.7 * self.number_of_last_action(2)
             # if action == 2:
                 # reward += 2.0
-            reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
+            reward = (1 - (var_avg - 0.15) / 0.15) * 2.0
             done = True
 
         if self.lap_count >= 4:
@@ -573,32 +573,34 @@ def main():
     env = MyF1TenthEnv(loaded_map, vehicle_params,path)
 
     rl_name = 'dqn'
+    training = True
 
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
     eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
     reward_callback = RewardLoggingCallback(save_path="models/rewards", rl_name=rl_name, verbose=1)
 
-    if rl_name == 'dqn':
-        model = DQN("MlpPolicy", env, verbose=1)
-        # model = DQN.load("models/re_ppo_f1tenth_model17", env=env)
-    elif rl_name == 'ppo':
-        model = PPO("MlpPolicy", env, verbose=1)
-        # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
-    elif rl_name == 're_ppo':
-        model = RecurrentPPO("MlpLstmPolicy", env, verbose=1)
-        # model = RecurrentPPO.load("models/re_ppo_f1tenth_model5", env=env)
-    elif rl_name == 'sac':
-        model = SAC("MlpPolicy", env, verbose=1)
-        # model = SAC.load("models/sac_f1tenth_model1", env=env)
+    if training:
+        if rl_name == 'dqn':
+            model = DQN("MlpPolicy", env, verbose=1)
+            # model = DQN.load("models/dqn_f1tenth_model18", env=env)
+        elif rl_name == 'ppo':
+            model = PPO("MlpPolicy", env, verbose=1)
+            # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
+        elif rl_name == 're_ppo':
+            model = RecurrentPPO("MlpLstmPolicy", env, verbose=1)
+            # model = RecurrentPPO.load("models/re_ppo_f1tenth_model5", env=env)
+        elif rl_name == 'sac':
+            model = SAC("MlpPolicy", env, verbose=1)
+            # model = SAC.load("models/sac_f1tenth_model1", env=env)
 
-    episode = 0
-    while True:
-        model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
-        model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
-        episode += 1
+        episode = 0
+        while True:
+            model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
+            model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
+            episode += 1
 
     if rl_name == 'dqn':
-        model = DQN.load("models/dqn_f1tenth_model34")
+        model = DQN.load("models/dqn_f1tenth_model18")
     elif rl_name == 'ppo':
         model = PPO.load("models/ppo_f1tenth_model8")
     elif rl_name == 're_ppo':
@@ -647,7 +649,7 @@ def main():
         #     obs, info = env.reset()
         #     frames = [env.render().copy()]
 
-    clip = ImageSequenceClip(frames, fps=40)
+    clip = ImageSequenceClip(frames, fps=60)
     clip.write_videofile('videos/test_' + rl_name + '.mp4', codec='libx264', audio=False)
     env.pred_opp_traj_cli.destroy_node()
     env.ego_drive_cli.destroy_node()
