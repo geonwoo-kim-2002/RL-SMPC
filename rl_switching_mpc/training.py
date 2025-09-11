@@ -164,6 +164,7 @@ class MyF1TenthEnv(gym.Env, Node):
         self.init_s = 0.
         self.lap_count = 0
         self.reset_count = 5
+        self.episode_count = 0
 
         self.reset_collections = True
         self.pred_opp_traj_cli = PredOppTrajClient()
@@ -187,7 +188,7 @@ class MyF1TenthEnv(gym.Env, Node):
         self.curr_s = self.init_s
         self.lap_count = 0
 
-        if self.reset_count > 4:
+        if self.reset_count > 2:
             self.reset_collections = True
             ed_future = self.ego_drive_cli.send_request(self.obs, reset=True)
             rclpy.spin_until_future_complete(self.ego_drive_cli, ed_future)
@@ -276,7 +277,7 @@ class MyF1TenthEnv(gym.Env, Node):
         # self.last_action.append(action)
 
         if self.last_action != action:
-            reward -= 1.0
+            reward -= min(0.01 * self.episode_count, 1.0)
             self.last_action = action
 
         # if obs[-3] == 0.0:  # mpc not solved
@@ -312,7 +313,7 @@ class MyF1TenthEnv(gym.Env, Node):
         e_v = max(min(e_v, 3.0), 0.0)
         # reward += (-exp(pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.1, 2))) + 1) * 2
         # reward += (exp(-pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.01, 2)))) * 2
-        reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2
+        reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2 - 1
 
         if obs[-2] == 1.0:  # collision
             print('Collision!')
@@ -320,13 +321,16 @@ class MyF1TenthEnv(gym.Env, Node):
             # acc_num = self.number_of_last_action(1)
             # overtake_num = self.number_of_last_action(2)
             # reward -= min(0.5 * solo_num + 0.5 * overtake_num, 0) + 1.0
-            reward = -20.0
+            reward -= 10.0
         elif obs[-1] == 1.0:  # success to overtake
             print('Overtaking success!')
             # reward = 0.7 * self.number_of_last_action(2)
             # if action == 2:
                 # reward += 2.0
-            reward = (1 - (var_avg - 0.15) / 0.15) * 2.0
+            # if action == 0:
+            #     reward = -100.0
+            # else:
+            reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
             done = True
 
         if self.lap_count >= 4:
@@ -334,11 +338,14 @@ class MyF1TenthEnv(gym.Env, Node):
             truncated = True
             # done = True
 
+        if done:
+            self.episode_count += 1
+
         # print(action_value, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count, 'ego s:', self.curr_s, 'opp s:', opp_s)
         # reward = max(reward, -10.0)
         # reward = (reward + 3.5) / 6.5
         # print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
-        print('action:', action_value, 'reward:', reward, 'lap count:', self.lap_count, 'var:', var_avg, 'e_v:', e_v)
+        print(f'action: {action_value:.1f}, reward: {reward:.4f}, lap count: {self.lap_count}, var: {var_avg:.4f}, e_v: {e_v:.4f}, episode: {self.episode_count}')
 
 
         return obs, reward, done, truncated, info
@@ -534,7 +541,7 @@ class RewardLoggingCallback(BaseCallback):
             # 에피소드 종료 → 현재 reward 기록
             self.episode_rewards.append(self.current_rewards / self.step_count if self.step_count > 0 else 0.0)
             if self.verbose > 0:
-                print(f"Episode {len(self.episode_rewards)} reward: {self.current_rewards}")
+                print(f"Episode {len(self.episode_rewards)} reward: {self.episode_rewards[-1]}")
 
             self.current_rewards = 0.0
             self.step_count = 0
@@ -552,7 +559,9 @@ class RewardLoggingCallback(BaseCallback):
         name = self.save_path + '_' + self.rl_name + '_' + str(curr_time) + '.npy'
         np.save(name, rewards_array)
         if self.verbose > 0:
-            print(f"Saved rewards to {name}")
+            print(f"Saved rewards to {name}, episode {len(self.episode_rewards)}, mean {np.mean(self.episode_rewards) if self.episode_rewards else 0.0}")
+        self.rewards = []
+        self.episode_rewards = []
 
 def mask_fn(env) -> np.ndarray:
     # Do whatever you'd like in this function to return the action mask
@@ -574,6 +583,7 @@ def main():
 
     rl_name = 'dqn'
     training = True
+    episode = 114
 
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
     eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
@@ -581,8 +591,8 @@ def main():
 
     if training:
         if rl_name == 'dqn':
-            model = DQN("MlpPolicy", env, verbose=1)
-            # model = DQN.load("models/dqn_f1tenth_model18", env=env)
+            # model = DQN("MlpPolicy", env, verbose=1)
+            model = DQN.load("models/dqn_f1tenth_model113", env=env)
         elif rl_name == 'ppo':
             model = PPO("MlpPolicy", env, verbose=1)
             # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
@@ -593,7 +603,7 @@ def main():
             model = SAC("MlpPolicy", env, verbose=1)
             # model = SAC.load("models/sac_f1tenth_model1", env=env)
 
-        episode = 0
+        # while episode <= 200:
         while True:
             model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
             model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
@@ -602,9 +612,9 @@ def main():
     if rl_name == 'dqn':
         model = DQN.load("models/dqn_f1tenth_model18")
     elif rl_name == 'ppo':
-        model = PPO.load("models/ppo_f1tenth_model8")
+        model = PPO.load("models/ppo_f1tenth_model199")
     elif rl_name == 're_ppo':
-        model = RecurrentPPO.load("models/re_ppo_f1tenth_model30")
+        model = RecurrentPPO.load("models/re_ppo_f1tenth_model199")
     elif rl_name == 'sac':
         model = SAC.load("models/sac_f1tenth_model51")
 
@@ -614,7 +624,7 @@ def main():
     truncated = False
     # for k in range(10):
     while not (done or truncated):
-        action, _ = model.predict(obs)
+        action, _ = model.predict(obs, deterministic=True)
         obs, reward, done, truncated, info = env.step(action)
         if 0.0 <= action < 1.0:
             action = 0
