@@ -8,6 +8,7 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import LaserScan
 from pred_msgs.msg import Detection, DetectionArray
 from rl_switching_mpc_srv.srv import PredOppTraj, Drive
+from ament_index_python.packages import get_package_share_directory
 
 import cv2
 import time
@@ -574,7 +575,10 @@ def main():
 
     vehicle_params = F110Env.f1tenth_vehicle_params()
     scale = 1.0
-    path = '/home/a/rl_switching_mpc/src/RL-SMPC/maps/icra2025/icra2025'
+    # path = '/home/a/rl_switching_mpc/src/RL-SMPC/maps/icra2025/icra2025'
+    map_name = 'icra2025'
+    pkg_path = get_package_share_directory('rl_switching_mpc')
+    path = f'{pkg_path}/maps/{map_name}/{map_name}'
     map_yaml = f'{path}.yaml'
     print('Loading map from path: %s' % (map_yaml))
     map_yaml = pathlib.Path(map_yaml)
@@ -591,8 +595,8 @@ def main():
 
     if training:
         if rl_name == 'dqn':
-            # model = DQN("MlpPolicy", env, verbose=1)
-            model = DQN.load("models/dqn_f1tenth_model113", env=env)
+            model = DQN("MlpPolicy", env, verbose=1)
+            # model = DQN.load("models/dqn_f1tenth_model113", env=env)
         elif rl_name == 'ppo':
             model = PPO("MlpPolicy", env, verbose=1)
             # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
