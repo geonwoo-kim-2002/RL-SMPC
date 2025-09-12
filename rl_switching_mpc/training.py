@@ -156,8 +156,8 @@ class MyF1TenthEnv(gym.Env, Node):
         # obs_dim = 4 + 8 * self.horizon + 2 * self.horizon + 1 + 1 + 1 # ego state, opp traj, track, mpc solved, collision, overtaking
         # obs_dim = 4 + 8 * self.horizon + 2 * self.horizon + 1 + 1 + 1 + 5 # ego state, opp traj, track, mpc solved, collision, overtaking, action change flag
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
-        self.action_space = spaces.Discrete(3)
-        # self.action_space = spaces.Box(low=0.0, high=3.0, shape=(1,), dtype=np.float32)
+        # self.action_space = spaces.Discrete(3)
+        self.action_space = spaces.Box(low=0.0, high=3.0, shape=(1,), dtype=np.float32)
         self.last_action = 0
         # self.last_action = [0, 0, 0, 0, 0]
         self.action_count = 0
@@ -209,15 +209,15 @@ class MyF1TenthEnv(gym.Env, Node):
 
     def step(self, action_value):
         # print("action:", action)
-        action = int(action_value)
+        # action = int(action_value)
         # action = 1
-        # action_value = float(action_value[0])
-        # if 0.0 <= action_value < 1.0:
-        #     action = 0
-        # elif 1.0 <= action_value < 2.0:
-        #     action = 1
-        # else:
-        #     action = 2
+        action_value = float(action_value[0])
+        if 0.0 <= action_value < 1.0:
+            action = 0
+        elif 1.0 <= action_value < 2.0:
+            action = 1
+        else:
+            action = 2
 
         pred_opp_traj = self._get_pred_opp_traj(self.obs, self.reset_collections)
         self.reset_collections = False
@@ -341,6 +341,7 @@ class MyF1TenthEnv(gym.Env, Node):
 
         if done:
             self.episode_count += 1
+            print(self.obs)
 
         # print(action_value, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count, 'ego s:', self.curr_s, 'opp s:', opp_s)
         # reward = max(reward, -10.0)
@@ -538,11 +539,12 @@ class RewardLoggingCallback(BaseCallback):
             self.current_rewards += reward[0]
             self.step_count += 1
 
-        if done is not None and done[0] and self.step_count > 50:
+        print("done:", done, ", reward:", reward)
+        if done is not None and done[0] and self.step_count > 20:
             # 에피소드 종료 → 현재 reward 기록
             self.episode_rewards.append(self.current_rewards / self.step_count if self.step_count > 0 else 0.0)
-            if self.verbose > 0:
-                print(f"Episode {len(self.episode_rewards)} reward: {self.episode_rewards[-1]}")
+            # if self.verbose > 0:
+            print(f"Episode {len(self.episode_rewards)} reward: {self.episode_rewards[-1]}")
 
             self.current_rewards = 0.0
             self.step_count = 0
@@ -559,8 +561,8 @@ class RewardLoggingCallback(BaseCallback):
         rewards_array = np.array(self.rewards)
         name = self.save_path + '_' + self.rl_name + '_' + str(curr_time) + '.npy'
         np.save(name, rewards_array)
-        if self.verbose > 0:
-            print(f"Saved rewards to {name}, episode {len(self.episode_rewards)}, mean {np.mean(self.episode_rewards) if self.episode_rewards else 0.0}")
+        # if self.verbose > 0:
+        print(f"Saved rewards to {name}, episode {len(self.episode_rewards)}, mean {np.mean(self.episode_rewards) if self.episode_rewards else 0.0}")
         self.rewards = []
         self.episode_rewards = []
 
@@ -585,9 +587,9 @@ def main():
     loaded_map = Track.from_track_path(map_yaml, scale)
     env = MyF1TenthEnv(loaded_map, vehicle_params,path)
 
-    rl_name = 'dqn'
+    rl_name = 'sac'
     training = True
-    episode = 114
+    episode = 0
 
     checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
     eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
