@@ -25,6 +25,25 @@ from sb3_contrib import RecurrentPPO
 from stable_baselines3 import PPO, DQN, SAC
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback, EvalCallback
 
+import csv
+import os
+def log_to_csv(x, y, mode, filename="log.csv"):
+    """
+    x, y, mode 값을 받아서 CSV 파일에 한 줄씩 기록하는 함수
+    :param x: X 좌표 (숫자 또는 문자열)
+    :param y: Y 좌표 (숫자 또는 문자열)
+    :param mode: 모드 값 (문자열)
+    :param filename: 저장할 CSV 파일 이름 (기본값: log.csv)
+    """
+    file_exists = os.path.isfile(filename)
+
+    # 파일이 없으면 헤더 추가
+    with open(filename, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow(["x", "y", "mode"])  # 헤더 작성
+        writer.writerow([x, y, mode])  # 데이터 작성
+
 class PredOppTrajClient(Node):
     def __init__(self):
         super().__init__("pred_opp_traj_client")
@@ -107,7 +126,7 @@ class DriveClient(Node):
         return self.cli.call_async(self.req)
 
 class MyF1TenthEnv(gym.Env, Node):
-    def __init__(self, loaded_map, vehicle_params, path):
+    def __init__(self, loaded_map, vehicle_params, path, training, ego_index):
         gym.Env.__init__(self)
         Node.__init__(self, "my_f1tenth_env")
 
@@ -156,8 +175,8 @@ class MyF1TenthEnv(gym.Env, Node):
         # obs_dim = 4 + 8 * self.horizon + 2 * self.horizon + 1 + 1 + 1 # ego state, opp traj, track, mpc solved, collision, overtaking
         # obs_dim = 4 + 8 * self.horizon + 2 * self.horizon + 1 + 1 + 1 + 5 # ego state, opp traj, track, mpc solved, collision, overtaking, action change flag
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
-        # self.action_space = spaces.Discrete(3)
-        self.action_space = spaces.Box(low=0.0, high=3.0, shape=(1,), dtype=np.float32)
+        self.action_space = spaces.Discrete(3)
+        # self.action_space = spaces.Box(low=0.0, high=3.0, shape=(1,), dtype=np.float32)
         self.last_action = 0
         # self.last_action = [0, 0, 0, 0, 0]
         self.action_count = 0
@@ -166,18 +185,26 @@ class MyF1TenthEnv(gym.Env, Node):
         self.lap_count = 0
         self.reset_count = 5
         self.episode_count = 0
+        self.after_overtaking = 0
 
         self.reset_collections = True
         self.pred_opp_traj_cli = PredOppTrajClient()
         self.ego_drive_cli = DriveClient('ego_drive')
         self.opp_drive_cli = DriveClient('opp_drive')
 
+        self.training = training
+        self.ego_index = ego_index
+
     def reset(self, seed=None, options=None):
         gym.Env.reset(self, seed=seed)
 
-        ego_index = random.randint(0, len(self.track.centerline.xs) - 1)
-        opp_index = (ego_index + random.randint(8, 12)) % len(self.track.centerline.xs)
-        print('Ego index:', ego_index, 'Opp index:', opp_index)
+        if self.training:
+            ego_index = random.randint(0, len(self.track.centerline.xs) - 1)
+            opp_index = (ego_index + random.randint(8, 12)) % len(self.track.centerline.xs)
+        else:
+            ego_index = self.ego_index
+            opp_index = self.ego_index + 10
+        print('Ego index:', ego_index, 'Opp index:', opp_index, 'Max index:', len(self.track.centerline.xs))
         initial_pose = np.array([[self.track.centerline.xs[ego_index], self.track.centerline.ys[ego_index], self.track.centerline.yaws[ego_index]], [self.track.centerline.xs[opp_index], self.track.centerline.ys[opp_index], self.track.centerline.yaws[opp_index]]])
         self.obs, info = self.f1_env.reset(options={"poses": initial_pose})
         self.last_action = 0
@@ -209,147 +236,140 @@ class MyF1TenthEnv(gym.Env, Node):
 
     def step(self, action_value):
         # print("action:", action)
-        # action = int(action_value)
+        action = int(action_value)
         # action = 1
-        action_value = float(action_value[0])
-        if 0.0 <= action_value < 1.0:
-            action = 0
-        elif 1.0 <= action_value < 2.0:
-            action = 1
-        else:
-            action = 2
+        # action_value = float(action_value[0])
+        # if 0.0 <= action_value < 1.0:
+        #     action = 0
+        # elif 1.0 <= action_value < 2.0:
+        #     action = 1
+        # else:
+        #     action = 2
 
         pred_opp_traj = self._get_pred_opp_traj(self.obs, self.reset_collections)
         self.reset_collections = False
 
-        while len(pred_opp_traj.detections) != self.horizon:
-            control, mpc_solved = self._get_control(0, pred_opp_traj, self.obs)
-            self.obs, step_reward, done, truncated, info = self.f1_env.step(control)
-            pred_opp_traj = self._get_pred_opp_traj(self.obs)
-            if done:
-                print("Observation:", self.obs)
-                print("step_reward:", step_reward)
-                print("done:", done)
-                print("truncated:", truncated)
-                print("info:", info)
-                print('collision while solo driving, resetting...')
-                self.f1_env = gym.make(
-                    "f1tenth_gym:f1tenth-v0",
-                    config={
-                        "map": self.loaded_map,
-                        "num_agents": 2,
-                        "timestep": 0.025,
-                        "integrator": "rk4",
-                        "control_input": ["accl", "steering_angle"],
-                        "model": "st",
-                        "observation_config": {"type": "original"},
-                        "params": self.vehicle_params,
-                        "reset_config": {"type": "map_random_static"},
-                        "scale": self.scale,
-                        "lidar_dist": 0.0
-                    },
-                    render_mode="rgb_array"
-                )
-                self.reset()
-                return self._combine_obs(self.obs, DetectionArray(), done=False), 0., False, True, info
+        if self.training:
+            while len(pred_opp_traj.detections) != self.horizon:
+                control, mpc_solved = self._get_control(0, pred_opp_traj, self.obs)
+                self.obs, step_reward, done, truncated, info = self.f1_env.step(control)
+                if self.after_overtaking > 0:
+                    self.after_overtaking += 1
+                if self.after_overtaking > 40:
+                    self.after_overtaking = 0
+                    done = True
+                pred_opp_traj = self._get_pred_opp_traj(self.obs)
+                if done:
+                    print("Observation:", self.obs)
+                    print("step_reward:", step_reward)
+                    print("done:", done)
+                    print("truncated:", truncated)
+                    print("info:", info)
+                    print('collision while solo driving, resetting...')
+                    self.f1_env = gym.make(
+                        "f1tenth_gym:f1tenth-v0",
+                        config={
+                            "map": self.loaded_map,
+                            "num_agents": 2,
+                            "timestep": 0.025,
+                            "integrator": "rk4",
+                            "control_input": ["accl", "steering_angle"],
+                            "model": "st",
+                            "observation_config": {"type": "original"},
+                            "params": self.vehicle_params,
+                            "reset_config": {"type": "map_random_static"},
+                            "scale": self.scale,
+                            "lidar_dist": 0.0
+                        },
+                        render_mode="rgb_array"
+                    )
+                    self.reset()
+                    return self._combine_obs(self.obs, DetectionArray(), done=False), 0., False, True, info
+
+        if len(pred_opp_traj.detections) != self.horizon:
+            action = 0
 
         control, mpc_solved = self._get_control(action, pred_opp_traj, self.obs)
 
         self.obs, _, done, truncated, info = self.f1_env.step(control)
+        # if not self.training:
+        #     log_to_csv(self.obs['poses_x'][0], self.obs['poses_y'][0], action, 'ego_traj.csv')
+        #     log_to_csv(self.obs['poses_x'][1], self.obs['poses_y'][1], 0, 'opp_traj.csv')
+
         self.curr_s = self.sp.find_s(self.obs['poses_x'][0], self.obs['poses_y'][0])
         if self._check_lap_complete():
             self.lap_count += 1
         self.prev_s = self.curr_s
 
         obs = self._combine_obs(self.obs, pred_opp_traj, done)
-        # reward = action * -0.05
-        # reward = -self.lap_count
-        reward = 0.0
-        # if self.action_count >= 1 and action != self.last_action[-1]:
-        #     reward -= 2.0
-        #     self.action_count = 1
-        # elif action != self.last_action[-1]:
-        #     self.action_count = 1
-        # elif self.action_count == 3:
-        #     self.action_count = 0
-        # elif self.action_count >= 1:
-        #     self.action_count += 1
-        # self.last_action.pop(0)
-        # self.last_action.append(action)
 
+        reward = 0.0
         if self.last_action != action:
             reward -= min(0.01 * self.episode_count, 1.0)
             self.last_action = action
 
-        # if obs[-3] == 0.0:  # mpc not solved
-        #     reward -= 0.1
-        var_avg = 0.
-        for i in range(len(pred_opp_traj.detections)):
-            det = pred_opp_traj.detections[i]
-            var_avg += det.x_var
-            var_avg += det.y_var
-            var_avg += det.v_var
-        var_avg /= (3 * len(pred_opp_traj.detections))
+        var_avg = 0.0
+        if len(pred_opp_traj.detections) > 0:
+            for i in range(len(pred_opp_traj.detections)):
+                det = pred_opp_traj.detections[i]
+                var_avg += det.x_var
+                var_avg += det.y_var
+                var_avg += det.v_var
+            var_avg /= (3 * len(pred_opp_traj.detections))
 
-        # opp_s = 0.0
-        # opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
-        # if opp_s - self.curr_s < -self.sp.s[-1] / 2:
-        #     opp_s += self.sp.s[-1]
-        # elif opp_s - self.curr_s > self.sp.s[-1] / 2:
-        #     opp_s -= self.sp.s[-1]
-        # dis = opp_s - self.curr_s
-
-        ego_v = self.obs['linear_vels_x'][0]
-        opp_v = pred_opp_traj.detections[0].v
-        e_v = ego_v - opp_v
-        # if action == 0:
-        #     reward -= (1 / (opp_s - self.curr_s + 1e-2)) * 1.34
-        # elif action == 1:
-        #     reward -= (1 / var_avg) * 0.06
-        # elif action == 2:
-        #     reward -= var_avg
+        if len(pred_opp_traj.detections) == 0:
+            ego_v = self.obs['linear_vels_x'][0]
+            opp_v = self.obs['linear_vels_x'][1]
+            e_v = ego_v - opp_v
+        else:
+            ego_v = self.obs['linear_vels_x'][0]
+            opp_v = pred_opp_traj.detections[0].v
+            e_v = ego_v - opp_v
 
         var_avg = max(min(var_avg, 0.3), 0.15)
-        # dis = max(min(dis, 7.0), 0.0)
         e_v = max(min(e_v, 3.0), 0.0)
-        # reward += (-exp(pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.1, 2))) + 1) * 2
-        # reward += (exp(-pow(abs(var_avg - 0.15) - abs(dis) * 0.15 / 7.0, 2) / (2 * pow(0.01, 2)))) * 2
         reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2 - 1
 
         if obs[-2] == 1.0:  # collision
-            print('Collision!')
-            # solo_num = self.number_of_last_action(0)
-            # acc_num = self.number_of_last_action(1)
-            # overtake_num = self.number_of_last_action(2)
-            # reward -= min(0.5 * solo_num + 0.5 * overtake_num, 0) + 1.0
-            reward -= 10.0
+            # print('Collision!')
+            reward -= 50.0
         elif obs[-1] == 1.0:  # success to overtake
-            print('Overtaking success!')
-            # reward = 0.7 * self.number_of_last_action(2)
-            # if action == 2:
-                # reward += 2.0
-            # if action == 0:
-            #     reward = -100.0
-            # else:
+            # print('Overtaking success!')
             reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
-            done = True
+            # done = True
+            if self.after_overtaking == 0:
+                self.after_overtaking = 1
+
+        if self.after_overtaking > 0:
+            if obs[-1] == 1.0 or len(pred_opp_traj.detections) != self.horizon:
+                self.after_overtaking += 1
+            else:
+                self.after_overtaking = 0
 
         if self.lap_count >= 4:
             print('Reached 4 laps')
             truncated = True
+
+        if self.after_overtaking > 40:
+            self.after_overtaking = 0
             # done = True
 
         if done:
             self.episode_count += 1
             print(self.obs)
 
+        if done or truncated:
+            if obs[-2] == 1.0:
+                print('Collision!')
+            elif obs[-1] == 1.0:
+                print('Overtaking success!')
         # print(action_value, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count, 'ego s:', self.curr_s, 'opp s:', opp_s)
         # reward = max(reward, -10.0)
         # reward = (reward + 3.5) / 6.5
         # print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
-        print(f'action: {action_value:.1f}, reward: {reward:.4f}, lap count: {self.lap_count}, var: {var_avg:.4f}, e_v: {e_v:.4f}, episode: {self.episode_count}')
+        # print(f'action: {action_value:.1f}, reward: {reward:.4f}, lap count: {self.lap_count}, var: {var_avg:.4f}, e_v: {e_v:.4f}, episode: {self.episode_count}')
 
-
+        info['action'] = action
         return obs, reward, done, truncated, info
         # return np.concatenate([obs, np.array(self.action_change_flag, dtype=np.float32)]), reward, done, truncated, info
 
@@ -438,42 +458,7 @@ class MyF1TenthEnv(gym.Env, Node):
         for i in range(len(pred_opp_traj.detections)):
             det = pred_opp_traj.detections[i]
             opp_s = self.sp.find_s(det.x, det.y)
-            # opp_d = self.sp.calc_d(det.x, det.y, opp_s)
-            # opp_yaw = self.sp.calc_yaw(opp_s) - det.yaw
 
-            # if opp_s - ego_s < -self.sp.s[-1] / 2:
-            #     opp_s += self.sp.s[-1]
-            # elif opp_s - ego_s > self.sp.s[-1] / 2:
-            #     opp_s -= self.sp.s[-1]
-            # opp_traj[i, 0] = opp_s - ego_s
-            # opp_traj[i, 1] = opp_d
-            # opp_traj[i, 2] = opp_yaw
-            # opp_traj[i, 3] = det.v
-
-            # yaw_track = self.sp.calc_yaw(opp_s)
-            # cos_y = np.cos(yaw_track)
-            # sin_y = np.sin(yaw_track)
-
-            # # 공분산 행렬 (x, y)
-            # cov_xy = np.array([[det.x_var, 0.0],
-            #                    [0.0, det.y_var]])
-
-            # # 회전변환 (R * cov_xy * R^T)
-            # R = np.array([[cos_y, sin_y],
-            #               [-sin_y, cos_y]])
-            # cov_sd = R @ cov_xy @ R.T
-
-            # s_var = cov_sd[0, 0]
-            # d_var = cov_sd[1, 1]
-
-            # opp_traj[i, 4] = s_var
-            # opp_traj[i, 5] = d_var
-            # opp_traj[i, 6] = det.yaw_var
-            # opp_traj[i, 7] = det.v_var
-            # opp_traj[i, 0] = s_var
-            # opp_traj[i, 1] = d_var
-            # opp_traj[i, 2] = det.yaw_var
-            # opp_traj[i, 2] = det.v_var
             opp_traj[i, 0] = (det.x_var + det.y_var) / 2
             opp_traj[i, 1] = det.v_var
 
@@ -501,6 +486,7 @@ class MyF1TenthEnv(gym.Env, Node):
         if opp_curr_s < ego_s:
             overtaking = True
 
+        # print('ego:', len(ego_state), 'opp:', len(opp_state), 'opp_traj:', len(opp_traj.flatten()), 'track:', len(track_info.flatten()), 'collision:', collision, 'overtaking:', overtaking)
         state_vector = np.concatenate([
             ego_state.flatten(),
             opp_state.flatten(),
@@ -566,11 +552,17 @@ class RewardLoggingCallback(BaseCallback):
         self.rewards = []
         self.episode_rewards = []
 
-def mask_fn(env) -> np.ndarray:
-    # Do whatever you'd like in this function to return the action mask
-    # for the current env. In this example, we assume the env has a
-    # helpful method we can rely on.
-    return env.f1_env.valid_action_mask()
+def get_rule_based_action(obs):
+    dis = obs[4] * 7.0
+    avg_var = np.sum(obs[8:88]) / 80.0
+
+    if dis < 5.0 and avg_var >= 0.3:
+        action = 1
+    elif dis < 5.0:
+        action = 2
+    else:
+        action = 0
+    return action
 
 def main():
     rclpy.init()
@@ -585,20 +577,22 @@ def main():
     print('Loading map from path: %s' % (map_yaml))
     map_yaml = pathlib.Path(map_yaml)
     loaded_map = Track.from_track_path(map_yaml, scale)
-    env = MyF1TenthEnv(loaded_map, vehicle_params,path)
 
-    rl_name = 'sac'
-    training = True
+    rl_name = 'mpcc'
+    training = False
     episode = 0
+    ego_index = 10
 
-    checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
-    eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
+    env = MyF1TenthEnv(loaded_map, vehicle_params, path, training, ego_index)
+
+    # checkpoint_callback = CheckpointCallback(save_freq=1000, save_path='./checkpoints/', name_prefix=rl_name + '_f1tenth')
+    # eval_callback = EvalCallback(env, best_model_save_path='./best_model/', log_path='./logs/', eval_freq=5000)
     reward_callback = RewardLoggingCallback(save_path="models/rewards", rl_name=rl_name, verbose=1)
 
     if training:
         if rl_name == 'dqn':
-            model = DQN("MlpPolicy", env, verbose=1)
-            # model = DQN.load("models/dqn_f1tenth_model113", env=env)
+            # model = DQN("MlpPolicy", env, verbose=1)
+            model = DQN.load("models/dqn_f1tenth_model60", env=env)
         elif rl_name == 'ppo':
             model = PPO("MlpPolicy", env, verbose=1)
             # model = PPO.load("models/re_ppo_f1tenth_model3", env=env)
@@ -611,62 +605,76 @@ def main():
 
         # while episode <= 200:
         while True:
-            model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
+            # model.learn(total_timesteps=4096, callback=[checkpoint_callback, eval_callback, reward_callback])
+            model.learn(total_timesteps=4096, callback=[reward_callback])
             model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
+            print("Model saved")
             episode += 1
 
     if rl_name == 'dqn':
         model = DQN.load("models/dqn_f1tenth_model18")
     elif rl_name == 'ppo':
-        model = PPO.load("models/ppo_f1tenth_model199")
+        model = PPO.load("models/ppo_f1tenth_model98")
+        # model = PPO.load("models_good_col=-10/ppo_f1tenth_model234")
     elif rl_name == 're_ppo':
         model = RecurrentPPO.load("models/re_ppo_f1tenth_model199")
     elif rl_name == 'sac':
         model = SAC.load("models/sac_f1tenth_model51")
 
-    obs, info = env.reset()
-    frames = [env.render().copy()]
-    done = False
-    truncated = False
-    # for k in range(10):
-    while not (done or truncated):
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, done, truncated, info = env.step(action)
-        if 0.0 <= action < 1.0:
-            action = 0
-        elif 1.0 <= action < 2.0:
-            action = 1
-        else:
-            action = 2
+    # obs, info = env.reset()
+    for ego_index in range(111):
+        env.ego_index = ego_index
+        obs, info = env.reset()
+        frames = [env.render().copy()]
+        done = False
+        truncated = False
+        while not (done or truncated):
+            if rl_name == 'rule':
+                action = get_rule_based_action(obs)
+            elif rl_name == 'mpcc':
+                action = 0
+            else:
+                action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = env.step(action)
+            action = info['action']
+            if 0.0 <= action < 1.0:
+                action = 0
+            elif 1.0 <= action < 2.0:
+                action = 1
+            else:
+                action = 2
 
-        frame = env.render().copy()
-        x_resolution, y_resolution = 0.046, 0.063
-        for i in range(len(env.ego_mpc_x)):
-            x_pix = int(frame.shape[1] / 2 + (env.ego_mpc_x[i] - env.obs['poses_x'][0]) / x_resolution)
-            y_pix = int(frame.shape[0] / 2 - (env.ego_mpc_y[i] - env.obs['poses_y'][0]) / y_resolution)
-            if action == 0:
-                color = (0, 0, 255)
-            elif action == 1:
-                color = (0, 255, 0)
-            elif action == 2:
-                color = (255, 0, 0)
-            cv2.circle(frame, (x_pix, y_pix), 2, color, -1)
-        for j in range(len(env.pred_opp_traj.detections)):
-            det = env.pred_opp_traj.detections[j]
-            x_pix = int(frame.shape[1] / 2 + (det.x - env.obs['poses_x'][0]) / x_resolution)
-            y_pix = int(frame.shape[0] / 2 - (det.y - env.obs['poses_y'][0]) / y_resolution)
-            cv2.ellipse(frame, center=(x_pix, y_pix), axes=(int(det.x_var / x_resolution), int(det.y_var / y_resolution)), angle=0, startAngle=0, endAngle=360, color=(200, 200, 200), thickness=-1)
-            cv2.circle(frame, (x_pix, y_pix), 2, (255, 255, 0), -1)
-        frames.append(frame)
-        # if done:
-        #     print("Done")
-        #     clip = ImageSequenceClip(frames, fps=80)
-        #     clip.write_videofile('videos/test_' + rl_name + '.mp4', codec='libx264', audio=False)
-        #     obs, info = env.reset()
-        #     frames = [env.render().copy()]
+            log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/MPCC/trajs/' + rl_name + '_' + str(ego_index) + '_ego.csv')
+            log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/MPCC/trajs/' + rl_name + '_' + str(ego_index) + '_opp.csv')
 
-    clip = ImageSequenceClip(frames, fps=60)
-    clip.write_videofile('videos/test_' + rl_name + '.mp4', codec='libx264', audio=False)
+            frame = env.render().copy()
+            x_resolution, y_resolution = 0.046, 0.063
+            for i in range(len(env.ego_mpc_x)):
+                x_pix = int(frame.shape[1] / 2 + (env.ego_mpc_x[i] - env.obs['poses_x'][0]) / x_resolution)
+                y_pix = int(frame.shape[0] / 2 - (env.ego_mpc_y[i] - env.obs['poses_y'][0]) / y_resolution)
+                if action == 0:
+                    color = (0, 0, 255)
+                elif action == 1:
+                    color = (0, 255, 0)
+                elif action == 2:
+                    color = (255, 0, 0)
+                cv2.circle(frame, (x_pix, y_pix), 2, color, -1)
+            for j in range(len(env.pred_opp_traj.detections)):
+                det = env.pred_opp_traj.detections[j]
+                x_pix = int(frame.shape[1] / 2 + (det.x - env.obs['poses_x'][0]) / x_resolution)
+                y_pix = int(frame.shape[0] / 2 - (det.y - env.obs['poses_y'][0]) / y_resolution)
+                cv2.ellipse(frame, center=(x_pix, y_pix), axes=(int(det.x_var / x_resolution), int(det.y_var / y_resolution)), angle=0, startAngle=0, endAngle=360, color=(200, 200, 200), thickness=-1)
+                cv2.circle(frame, (x_pix, y_pix), 2, (255, 255, 0), -1)
+            frames.append(frame)
+            # if done:
+            #     print("Done")
+            #     clip = ImageSequenceClip(frames, fps=80)
+            #     clip.write_videofile('videos/test_' + rl_name + '.mp4', codec='libx264', audio=False)
+            #     obs, info = env.reset()
+            #     frames = [env.render().copy()]
+
+        clip = ImageSequenceClip(frames, fps=60)
+        clip.write_videofile('results/MPCC/videos/' + rl_name + '_' + str(ego_index) + '.mp4', codec='libx264', audio=False)
     env.pred_opp_traj_cli.destroy_node()
     env.ego_drive_cli.destroy_node()
     env.opp_drive_cli.destroy_node()
