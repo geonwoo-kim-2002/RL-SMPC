@@ -255,38 +255,20 @@ class MyF1TenthEnv(gym.Env, Node):
             while len(pred_opp_traj.detections) != self.horizon:
                 control, mpc_solved = self._get_control(0, pred_opp_traj, self.obs)
                 self.obs, step_reward, done, truncated, info = self.f1_env.step(control)
-                if self.after_overtaking > 0:
-                    self.after_overtaking += 1
-                if self.after_overtaking > 40:
-                    self.after_overtaking = 0
-                    done = True
                 pred_opp_traj = self._get_pred_opp_traj(self.obs)
+                obs = self._combine_obs(self.obs, pred_opp_traj, done)
+                if obs[-2] == 1.0:  # collision
+                    print('Collision!===================================================')
+                    reward = -200.0
+                elif obs[-1] == 1.0:  # success to overtake
+                    if self.print_flag == 0:
+                        print('Overtaking success!')
+                        self.print_flag = 1
+                    done = True
+                    reward = 3.0
+
                 if done:
-                    print("Observation:", self.obs)
-                    print("step_reward:", step_reward)
-                    print("done:", done)
-                    print("truncated:", truncated)
-                    print("info:", info)
-                    print('collision while solo driving, resetting...')
-                    self.f1_env = gym.make(
-                        "f1tenth_gym:f1tenth-v0",
-                        config={
-                            "map": self.loaded_map,
-                            "num_agents": 2,
-                            "timestep": 0.025,
-                            "integrator": "rk4",
-                            "control_input": ["accl", "steering_angle"],
-                            "model": "st",
-                            "observation_config": {"type": "original"},
-                            "params": self.vehicle_params,
-                            "reset_config": {"type": "map_random_static"},
-                            "scale": self.scale,
-                            "lidar_dist": 0.0
-                        },
-                        render_mode="rgb_array"
-                    )
-                    self.reset()
-                    return self._combine_obs(self.obs, DetectionArray(), done=False), 0., False, True, info
+                    return obs, reward, done, False, info
 
         if len(pred_opp_traj.detections) != self.horizon:
             action = 0
@@ -307,7 +289,7 @@ class MyF1TenthEnv(gym.Env, Node):
 
         reward = 0.0
         if self.last_action != action:
-            reward -= min(0.01 * self.episode_count, 1.0)
+            reward -= min(0.01 * self.episode_count, 2.0)
             self.last_action = action
 
         var_avg = 0.0
@@ -334,28 +316,28 @@ class MyF1TenthEnv(gym.Env, Node):
 
         if obs[-2] == 1.0:  # collision
             print('Collision!===================================================')
-            reward -= 50.0
+            reward -= 200.0
         elif obs[-1] == 1.0:  # success to overtake
             if self.print_flag == 0:
                 print('Overtaking success!')
                 self.print_flag = 1
             reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
             # done = True
-            if self.after_overtaking == 0:
-                self.after_overtaking = 1
+            # if self.after_overtaking == 0:
+            #     self.after_overtaking = 1
 
-        if self.after_overtaking > 0:
-            if obs[-1] == 1.0 or len(pred_opp_traj.detections) != self.horizon:
-                self.after_overtaking += 1
-            else:
-                self.after_overtaking = 0
+        # if self.after_overtaking > 0:
+        #     if obs[-1] == 1.0 or len(pred_opp_traj.detections) != self.horizon:
+        #         self.after_overtaking += 1
+        #     else:
+        #         self.after_overtaking = 0
 
         if self.lap_count >= 4:
             print('Reached 4 laps')
             truncated = True
 
-        if self.after_overtaking > 40:
-            self.after_overtaking = 0
+        # if self.after_overtaking > 40:
+        #     self.after_overtaking = 0
             # done = True
 
         if done:
@@ -366,7 +348,8 @@ class MyF1TenthEnv(gym.Env, Node):
         # reward = max(reward, -10.0)
         # reward = (reward + 3.5) / 6.5
         # print('action:', action_value, 'reward:', real_reward, 'lap count:', self.lap_count)
-        # print(f'action: {action_value:.1f}, reward: {reward:.4f}, lap count: {self.lap_count}, var: {var_avg:.4f}, e_v: {e_v:.4f}, episode: {self.episode_count}')
+        if self.training:
+            print(f'action: {action_value:.1f}, reward: {reward:.4f}, lap count: {self.lap_count}, var: {var_avg:.4f}, e_v: {e_v:.4f}, episode: {self.episode_count}')
 
         info['action'] = action
         return obs, reward, done, truncated, info
@@ -469,20 +452,23 @@ class MyF1TenthEnv(gym.Env, Node):
             width_idx = round(s * 100)
             left_width = self.width_info['left'][width_idx]
             right_width = self.width_info['right'][width_idx]
-            track_info[i, 0] = min(left_width, right_width) / 3.0
+            track_info[i, 0] = min(left_width, right_width) * 10
             # track_info[i, 0] = left_width
             # track_info[i, 1] = right_width
-            track_info[i, 1] = abs(self.sp.calc_curvature(s))
+            track_info[i, 1] = abs(self.sp.calc_curvature(s)) * 10
 
         # collision, overtaking
         collision = done
         overtaking = False
-        opp_curr_s = self.sp.find_s(obs['poses_x'][1], obs['poses_y'][1])
+        opp_curr_s = self.sp.find_s(obs['poses_x'][1], obs['poses_y'][1]) + 1
+        if opp_curr_s > self.sp.s[-1]:
+            opp_curr_s -= self.sp.s[-1]
+
         if opp_curr_s - ego_s < -self.sp.s[-1] / 2:
             opp_curr_s += self.sp.s[-1]
         elif opp_curr_s - ego_s > self.sp.s[-1] / 2:
             opp_curr_s -= self.sp.s[-1]
-        if opp_curr_s < ego_s:
+        if opp_curr_s - ego_s < -1.0:
             overtaking = True
 
         # print('ego:', len(ego_state), 'opp:', len(opp_state), 'opp_traj:', len(opp_traj.flatten()), 'track:', len(track_info.flatten()), 'collision:', collision, 'overtaking:', overtaking)
@@ -643,8 +629,8 @@ def main():
             else:
                 action = 2
 
-            log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/5.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_ego.csv')
-            log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/5.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_opp.csv')
+            log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/8.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_ego.csv')
+            log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/8.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_opp.csv')
 
             # frame = env.render().copy()
             # x_resolution, y_resolution = 0.046, 0.063
