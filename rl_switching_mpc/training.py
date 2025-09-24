@@ -186,6 +186,7 @@ class MyF1TenthEnv(gym.Env, Node):
         self.reset_count = 5
         self.episode_count = 0
         self.after_overtaking = 0
+        self.print_flag = 0
 
         self.reset_collections = True
         self.pred_opp_traj_cli = PredOppTrajClient()
@@ -203,7 +204,7 @@ class MyF1TenthEnv(gym.Env, Node):
             opp_index = (ego_index + random.randint(8, 12)) % len(self.track.centerline.xs)
         else:
             ego_index = self.ego_index
-            opp_index = self.ego_index + 10
+            opp_index = (self.ego_index + 10) % len(self.track.centerline.xs)
         print('Ego index:', ego_index, 'Opp index:', opp_index, 'Max index:', len(self.track.centerline.xs))
         initial_pose = np.array([[self.track.centerline.xs[ego_index], self.track.centerline.ys[ego_index], self.track.centerline.yaws[ego_index]], [self.track.centerline.xs[opp_index], self.track.centerline.ys[opp_index], self.track.centerline.yaws[opp_index]]])
         self.obs, info = self.f1_env.reset(options={"poses": initial_pose})
@@ -215,8 +216,9 @@ class MyF1TenthEnv(gym.Env, Node):
         self.prev_s = self.init_s
         self.curr_s = self.init_s
         self.lap_count = 0
+        self.print_flag = 0
 
-        if self.reset_count > 2:
+        if self.reset_count >= 0:
             self.reset_collections = True
             ed_future = self.ego_drive_cli.send_request(self.obs, reset=True)
             rclpy.spin_until_future_complete(self.ego_drive_cli, ed_future)
@@ -331,10 +333,12 @@ class MyF1TenthEnv(gym.Env, Node):
         reward += (exp(-pow(abs(var_avg - 0.15) / 0.15 * 3.0 - abs(-e_v + 3), 2) / (2 * pow(1, 2)))) * 2 - 1
 
         if obs[-2] == 1.0:  # collision
-            # print('Collision!')
+            print('Collision!===================================================')
             reward -= 50.0
         elif obs[-1] == 1.0:  # success to overtake
-            # print('Overtaking success!')
+            if self.print_flag == 0:
+                print('Overtaking success!')
+                self.print_flag = 1
             reward += (1 - (var_avg - 0.15) / 0.15) * 2.0
             # done = True
             if self.after_overtaking == 0:
@@ -356,13 +360,8 @@ class MyF1TenthEnv(gym.Env, Node):
 
         if done:
             self.episode_count += 1
-            print(self.obs)
+            # print(self.obs)
 
-        if done or truncated:
-            if obs[-2] == 1.0:
-                print('Collision!')
-            elif obs[-1] == 1.0:
-                print('Overtaking success!')
         # print(action_value, 'action:', action, 'reward:', reward, 'lap count:', self.lap_count, 'ego s:', self.curr_s, 'opp s:', opp_s)
         # reward = max(reward, -10.0)
         # reward = (reward + 3.5) / 6.5
@@ -578,10 +577,10 @@ def main():
     map_yaml = pathlib.Path(map_yaml)
     loaded_map = Track.from_track_path(map_yaml, scale)
 
-    rl_name = 'mpcc'
+    rl_name = 'ppo'
     training = False
     episode = 0
-    ego_index = 10
+    ego_index = 0
 
     env = MyF1TenthEnv(loaded_map, vehicle_params, path, training, ego_index)
 
@@ -622,10 +621,10 @@ def main():
         model = SAC.load("models/sac_f1tenth_model51")
 
     # obs, info = env.reset()
-    for ego_index in range(111):
+    for ego_index in range(0, 111, 10):
         env.ego_index = ego_index
         obs, info = env.reset()
-        frames = [env.render().copy()]
+        # frames = [env.render().copy()]
         done = False
         truncated = False
         while not (done or truncated):
@@ -644,28 +643,28 @@ def main():
             else:
                 action = 2
 
-            log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/MPCC/trajs/' + rl_name + '_' + str(ego_index) + '_ego.csv')
-            log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/MPCC/trajs/' + rl_name + '_' + str(ego_index) + '_opp.csv')
+            log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/5.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_ego.csv')
+            log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/5.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_opp.csv')
 
-            frame = env.render().copy()
-            x_resolution, y_resolution = 0.046, 0.063
-            for i in range(len(env.ego_mpc_x)):
-                x_pix = int(frame.shape[1] / 2 + (env.ego_mpc_x[i] - env.obs['poses_x'][0]) / x_resolution)
-                y_pix = int(frame.shape[0] / 2 - (env.ego_mpc_y[i] - env.obs['poses_y'][0]) / y_resolution)
-                if action == 0:
-                    color = (0, 0, 255)
-                elif action == 1:
-                    color = (0, 255, 0)
-                elif action == 2:
-                    color = (255, 0, 0)
-                cv2.circle(frame, (x_pix, y_pix), 2, color, -1)
-            for j in range(len(env.pred_opp_traj.detections)):
-                det = env.pred_opp_traj.detections[j]
-                x_pix = int(frame.shape[1] / 2 + (det.x - env.obs['poses_x'][0]) / x_resolution)
-                y_pix = int(frame.shape[0] / 2 - (det.y - env.obs['poses_y'][0]) / y_resolution)
-                cv2.ellipse(frame, center=(x_pix, y_pix), axes=(int(det.x_var / x_resolution), int(det.y_var / y_resolution)), angle=0, startAngle=0, endAngle=360, color=(200, 200, 200), thickness=-1)
-                cv2.circle(frame, (x_pix, y_pix), 2, (255, 255, 0), -1)
-            frames.append(frame)
+            # frame = env.render().copy()
+            # x_resolution, y_resolution = 0.046, 0.063
+            # for i in range(len(env.ego_mpc_x)):
+            #     x_pix = int(frame.shape[1] / 2 + (env.ego_mpc_x[i] - env.obs['poses_x'][0]) / x_resolution)
+            #     y_pix = int(frame.shape[0] / 2 - (env.ego_mpc_y[i] - env.obs['poses_y'][0]) / y_resolution)
+            #     if action == 0:
+            #         color = (0, 0, 255)
+            #     elif action == 1:
+            #         color = (0, 255, 0)
+            #     elif action == 2:
+            #         color = (255, 0, 0)
+            #     cv2.circle(frame, (x_pix, y_pix), 2, color, -1)
+            # for j in range(len(env.pred_opp_traj.detections)):
+            #     det = env.pred_opp_traj.detections[j]
+            #     x_pix = int(frame.shape[1] / 2 + (det.x - env.obs['poses_x'][0]) / x_resolution)
+            #     y_pix = int(frame.shape[0] / 2 - (det.y - env.obs['poses_y'][0]) / y_resolution)
+            #     cv2.ellipse(frame, center=(x_pix, y_pix), axes=(int(det.x_var / x_resolution), int(det.y_var / y_resolution)), angle=0, startAngle=0, endAngle=360, color=(200, 200, 200), thickness=-1)
+            #     cv2.circle(frame, (x_pix, y_pix), 2, (255, 255, 0), -1)
+            # frames.append(frame)
             # if done:
             #     print("Done")
             #     clip = ImageSequenceClip(frames, fps=80)
@@ -673,8 +672,8 @@ def main():
             #     obs, info = env.reset()
             #     frames = [env.render().copy()]
 
-        clip = ImageSequenceClip(frames, fps=60)
-        clip.write_videofile('results/MPCC/videos/' + rl_name + '_' + str(ego_index) + '.mp4', codec='libx264', audio=False)
+        # clip = ImageSequenceClip(frames, fps=60)
+        # clip.write_videofile('results/MPCC/videos/' + rl_name + '_' + str(ego_index) + '.mp4', codec='libx264', audio=False)
     env.pred_opp_traj_cli.destroy_node()
     env.ego_drive_cli.destroy_node()
     env.opp_drive_cli.destroy_node()
