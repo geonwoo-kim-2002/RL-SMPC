@@ -282,7 +282,7 @@ class MyF1TenthEnv(gym.Env, Node):
 
         reward = 0.0
         if self.last_action != action:
-            reward -= min(0.01 * self.episode_count, 1.0)
+            reward -= min(0.1 * self.episode_count, 3.0)
             # reward -= 3.0
             self.last_action = action
 
@@ -322,7 +322,7 @@ class MyF1TenthEnv(gym.Env, Node):
         #     reward -= 0.1
 
         if action == 0:
-            reward -= 1.0
+            reward -= 3.0
 
         if self.lap_count >= 4:
             print('Reached 4 laps')
@@ -601,6 +601,7 @@ def main():
             model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
             print("Model saved")
             episode += 1
+            env.reset_count = 5
 
     if rl_name == 'dqn':
         model = DQN.load("models/dqn_f1tenth_model18")
@@ -611,11 +612,12 @@ def main():
     elif rl_name == 'sac':
         model = SAC.load("models/sac_f1tenth_model51")
     elif rl_name == 'qr_dqn':
-        model = QRDQN.load("models/qr_dqn_f1tenth_model151", env=env)
+        model = QRDQN.load("models/qr_dqn_f1tenth_model382", env=env)
 
     # obs, info = env.reset()
     for ego_index in range(0, 11, 10):
         env.ego_index = ego_index
+        env.reset_count = 5
         obs, info = env.reset()
         frames = [env.render().copy()]
         done = False
