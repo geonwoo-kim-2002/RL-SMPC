@@ -170,8 +170,8 @@ class MyF1TenthEnv(gym.Env, Node):
             self.min_curvature = min(self.min_curvature, abs(curr_curvature))
 
         self.horizon = 40
-        # obs_dim = 4 + 4 + 2 * self.horizon + 2 * self.horizon + 1 + 1 # ego state, opp state, opp traj var, track, mpc_solved, collision, overtaking
-        obs_dim = 2 + 3 + 1 + 1 # ego state, opp state, opp traj var, track, mpc_solved, collision, overtaking
+        obs_dim = 4 + 4 + 2 * self.horizon + 2 * self.horizon + 1 + 1 + 1 # ego state, opp state, opp traj var, track, mpc_solved, collision, overtaking
+        # obs_dim = 2 + 3 + 1 + 1 # ego state, opp state, opp traj var, track, mpc_solved, collision, overtaking
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Discrete(3)
         # self.action_space = spaces.Box(low=0.0, high=3.0, shape=(1,), dtype=np.float32)
@@ -190,10 +190,10 @@ class MyF1TenthEnv(gym.Env, Node):
         self.training = training
         self.ego_index = ego_index
 
-        self.var_avg = 0.18
+        self.var_avg = 0.12
         self.var_avg_max = 0.12
-        self.var_avg_min = 0.025
-        self.e_v_max = 3.0
+        self.var_avg_min = 0.05
+        self.e_v_max = 2.0
         self.e_v_min = -1.0
 
     def reset(self, seed=None, options=None):
@@ -201,7 +201,7 @@ class MyF1TenthEnv(gym.Env, Node):
 
         if self.training:
             ego_index = random.randint(0, len(self.track.centerline.xs) - 1)
-            opp_index = (ego_index + random.randint(8, 12)) % len(self.track.centerline.xs)
+            opp_index = (ego_index + random.randint(10, 15)) % len(self.track.centerline.xs)
         else:
             ego_index = self.ego_index
             opp_index = (self.ego_index + 10) % len(self.track.centerline.xs)
@@ -215,7 +215,7 @@ class MyF1TenthEnv(gym.Env, Node):
         self.lap_count = 0
         self.print_flag = 0
 
-        if self.reset_count >= 2:
+        if self.reset_count >= 0:
             self.reset_collections = True
             ed_future = self.ego_drive_cli.send_request(self.obs, reset=True)
             rclpy.spin_until_future_complete(self.ego_drive_cli, ed_future)
@@ -236,7 +236,7 @@ class MyF1TenthEnv(gym.Env, Node):
     def step(self, action_value):
         # print("action:", action)
         action = int(action_value)
-        # action = 1
+        # action = 2
         # action_value = float(action_value[0])
         # if 0.0 <= action_value < 1.0:
         #     action = 0
@@ -256,7 +256,9 @@ class MyF1TenthEnv(gym.Env, Node):
                 obs = self._combine_obs(self.obs, pred_opp_traj, done, mpc_solved)
                 if obs[-2] == 1.0:  # collision
                     print('Collision!===================================================')
-                    reward = -10.0
+                    self.episode_count += 1
+                    return obs, 0.0, False, True, info
+                    reward = -5.0
                 elif obs[-1] == 1.0:  # success to overtake
                     if self.print_flag == 0:
                         print('Overtaking success!')
@@ -265,6 +267,7 @@ class MyF1TenthEnv(gym.Env, Node):
                     reward = (1 - (self.var_avg - self.var_avg_min) / (self.var_avg_max - self.var_avg_min)) * 1.0
 
                 if done:
+                    self.episode_count += 1
                     return obs, reward, done, False, info
 
         if len(pred_opp_traj.detections) != self.horizon:
@@ -282,7 +285,7 @@ class MyF1TenthEnv(gym.Env, Node):
 
         reward = 0.0
         if self.last_action != action:
-            reward -= min(0.1 * self.episode_count, 3.0)
+            reward -= min(0.1 * self.episode_count, 5.0)
             # reward -= 3.0
             self.last_action = action
 
@@ -294,7 +297,7 @@ class MyF1TenthEnv(gym.Env, Node):
                 self.var_avg += det.y_var
                 self.var_avg += det.v_var
             self.var_avg /= (3 * len(pred_opp_traj.detections))
-
+        print(f'Var avg: {self.var_avg:.4f}')
         if len(pred_opp_traj.detections) == 0:
             ego_v = self.obs['linear_vels_x'][0]
             opp_v = self.obs['linear_vels_x'][1]
@@ -310,7 +313,7 @@ class MyF1TenthEnv(gym.Env, Node):
 
         if obs[-2] == 1.0:  # collision
             print('Collision!===================================================')
-            reward -= 10.0
+            reward -= 5.0
         elif obs[-1] == 1.0:  # success to overtake
             if self.print_flag == 0:
                 print('Overtaking success!')
@@ -318,8 +321,8 @@ class MyF1TenthEnv(gym.Env, Node):
             reward += (1 - (self.var_avg - self.var_avg_min) / (self.var_avg_max - self.var_avg_min)) * 1.0
             if self.training:
                 done = True
-        # elif obs[-3] == 0.0:  # mpc not solved
-        #     reward -= 0.1
+        elif obs[-3] == 0.0:  # mpc not solved
+            reward -= 3.0
 
         if action == 0:
             reward -= 3.0
@@ -330,7 +333,7 @@ class MyF1TenthEnv(gym.Env, Node):
             # done = True
             truncated = True
 
-        if done:
+        if done or truncated:
             self.episode_count += 1
 
         if self.training:
@@ -391,75 +394,98 @@ class MyF1TenthEnv(gym.Env, Node):
     def _combine_obs(self, obs, pred_opp_traj, done, mpc_solved):
         # ego state
         ego_s = self.sp.find_s(obs['poses_x'][0], obs['poses_y'][0])
+        s = ego_s
+        if s > self.sp.s[-1]:
+            s -= self.sp.s[-1]
+        elif s < 0.0:
+            s += self.sp.s[-1]
         ego_d = self.sp.calc_d(obs['poses_x'][0], obs['poses_y'][0], ego_s)
         ego_yaw = self.sp.calc_yaw(ego_s) - obs['poses_theta'][0]
-        ego_state = np.array([0.0, abs(ego_d) / self.max_width, 0.0, obs['linear_vels_x'][0] / 10.0])
+        ego_state = np.array([0.0, (ego_d + self.width_info['left'][round(s * 100)]) / self.max_width, (ego_yaw + np.pi) / (2 * np.pi), obs['linear_vels_x'][0] / 10.0])
 
         # opp state
         if len(pred_opp_traj.detections) == 0:
             opp_s = self.sp.find_s(obs['poses_x'][1], obs['poses_y'][1])
-            opp_d = self.sp.calc_d(obs['poses_x'][1], obs['poses_y'][1], opp_s)
-            opp_yaw = self.sp.calc_yaw(opp_s) - obs['poses_theta'][1]
-            opp_state = np.array([(opp_s - ego_s) / 7.0, abs(opp_d) / self.max_width, 0.0, obs['linear_vels_x'][1] / 10.0])
-        else:
-            opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
-            opp_d = self.sp.calc_d(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y, opp_s)
-            opp_yaw = self.sp.calc_yaw(opp_s) - pred_opp_traj.detections[0].yaw
+            s = opp_s
+            if s > self.sp.s[-1]:
+                s -= self.sp.s[-1]
+            elif s < 0.0:
+                s += self.sp.s[-1]
+
             if opp_s - ego_s < -self.sp.s[-1] / 2:
                 opp_s += self.sp.s[-1]
             elif opp_s - ego_s > self.sp.s[-1] / 2:
                 opp_s -= self.sp.s[-1]
-            opp_state = np.array([(opp_s - ego_s) / 7.0, abs(opp_d) / self.max_width, 0.0, pred_opp_traj.detections[0].v / 10.0])
+            opp_d = self.sp.calc_d(obs['poses_x'][1], obs['poses_y'][1], opp_s)
+            opp_yaw = self.sp.calc_yaw(opp_s) - obs['poses_theta'][1]
+            opp_state = np.array([abs(opp_s - ego_s + 1) / 8.0, (opp_d + self.width_info['left'][round(s * 100)]) / self.max_width, (opp_yaw + np.pi) / (2 * np.pi), obs['linear_vels_x'][1] / 10.0])
+        else:
+            opp_s = self.sp.find_s(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y)
+            s = opp_s
+            if s > self.sp.s[-1]:
+                s -= self.sp.s[-1]
+            elif s < 0.0:
+                s += self.sp.s[-1]
 
-        stats_diff = np.array([opp_state[0], ego_state[3] - opp_state[3]])
+            if opp_s - ego_s < -self.sp.s[-1] / 2:
+                opp_s += self.sp.s[-1]
+            elif opp_s - ego_s > self.sp.s[-1] / 2:
+                opp_s -= self.sp.s[-1]
+            opp_d = self.sp.calc_d(pred_opp_traj.detections[0].x, pred_opp_traj.detections[0].y, opp_s)
+            opp_yaw = self.sp.calc_yaw(opp_s) - pred_opp_traj.detections[0].yaw
+            opp_state = np.array([abs(opp_s - ego_s + 1) / 8.0, (opp_d + self.width_info['left'][round(s * 100)]) / self.max_width, (opp_yaw + np.pi) / (2 * np.pi), pred_opp_traj.detections[0].v / 10.0])
+
+        # print('ego state:', ego_state)
+        # print('opp state:', opp_state)
+        # stats_diff = np.array([opp_state[0], ego_state[3] - opp_state[3]])
         # opp traj
-        # opp_traj = np.zeros((self.horizon, 2))
-        # # track info
-        # track_info = np.zeros((self.horizon, 2))
-        # for i in range(len(pred_opp_traj.detections)):
-        #     det = pred_opp_traj.detections[i]
-        #     opp_s = self.sp.find_s(det.x, det.y)
+        opp_traj = np.zeros((self.horizon, 2))
+        # track info
+        track_info = np.zeros((self.horizon, 2))
+        for i in range(len(pred_opp_traj.detections)):
+            det = pred_opp_traj.detections[i]
+            opp_s = self.sp.find_s(det.x, det.y)
 
-        #     opp_traj[i, 0] = (det.x_var + det.y_var) / 2
-        #     opp_traj[i, 1] = det.v_var
+            opp_traj[i, 0] = (det.x_var + det.y_var) / 2
+            opp_traj[i, 1] = det.v_var
 
-        #     s = opp_s
-        #     if s > self.sp.s[-1]:
-        #         s -= self.sp.s[-1]
-        #     elif s < 0.0:
-        #         s += self.sp.s[-1]
-        #     width_idx = round(s * 100)
-        #     left_width = self.width_info['left'][width_idx]
-        #     right_width = self.width_info['right'][width_idx]
-        #     track_info[i, 0] = min(left_width, right_width) * 10
-        #     # track_info[i, 0] = left_width
-        #     # track_info[i, 1] = right_width
-        #     track_info[i, 1] = abs(self.sp.calc_curvature(s)) * 10
+            s = opp_s
+            if s > self.sp.s[-1]:
+                s -= self.sp.s[-1]
+            elif s < 0.0:
+                s += self.sp.s[-1]
+            width_idx = round(s * 100)
+            left_width = self.width_info['left'][width_idx]
+            right_width = self.width_info['right'][width_idx]
+            track_info[i, 0] = min(left_width, right_width)
+            # track_info[i, 0] = left_width
+            # track_info[i, 1] = right_width
+            track_info[i, 1] = abs(self.sp.calc_curvature(s))
 
-        var_avg = 0.0
-        width_avg = 0.0
-        curvature_avg = 0.0
-        if len(pred_opp_traj.detections) > 0:
-            for i in range(len(pred_opp_traj.detections)):
-                det = pred_opp_traj.detections[i]
-                var_avg += det.x_var
-                var_avg += det.y_var
-                var_avg += det.v_var
+        # var_avg = 0.0
+        # width_avg = 0.0
+        # curvature_avg = 0.0
+        # if len(pred_opp_traj.detections) > 0:
+        #     for i in range(len(pred_opp_traj.detections)):
+        #         det = pred_opp_traj.detections[i]
+        #         var_avg += det.x_var
+        #         var_avg += det.y_var
+        #         var_avg += det.v_var
 
-                opp_s = self.sp.find_s(det.x, det.y)
-                if opp_s > self.sp.s[-1]:
-                    opp_s -= self.sp.s[-1]
-                elif opp_s < 0.0:
-                    opp_s += self.sp.s[-1]
-                width_idx = round(opp_s * 100)
-                left_width = self.width_info['left'][width_idx]
-                right_width = self.width_info['right'][width_idx]
-                width_avg += min(left_width, right_width)
-                curvature_avg += abs(self.sp.calc_curvature(opp_s))
+        #         opp_s = self.sp.find_s(det.x, det.y)
+        #         if opp_s > self.sp.s[-1]:
+        #             opp_s -= self.sp.s[-1]
+        #         elif opp_s < 0.0:
+        #             opp_s += self.sp.s[-1]
+        #         width_idx = round(opp_s * 100)
+        #         left_width = self.width_info['left'][width_idx]
+        #         right_width = self.width_info['right'][width_idx]
+        #         width_avg += min(left_width, right_width)
+        #         curvature_avg += abs(self.sp.calc_curvature(opp_s))
 
-            var_avg /= (3 * len(pred_opp_traj.detections))
-            width_avg /= len(pred_opp_traj.detections)
-            curvature_avg /= len(pred_opp_traj.detections)
+        #     var_avg /= (3 * len(pred_opp_traj.detections))
+        #     width_avg /= len(pred_opp_traj.detections)
+        #     curvature_avg /= len(pred_opp_traj.detections)
 
         # collision, overtaking
         collision = done
@@ -477,13 +503,14 @@ class MyF1TenthEnv(gym.Env, Node):
 
         # print('ego:', len(ego_state), 'opp:', len(opp_state), 'opp_traj:', len(opp_traj.flatten()), 'track:', len(track_info.flatten()), 'collision:', collision, 'overtaking:', overtaking)
         state_vector = np.concatenate([
-            # ego_state.flatten(),
-            # opp_state.flatten(),
-            stats_diff.flatten(),
-            # opp_traj.flatten(),
-            # track_info.flatten(),
-            np.array([var_avg * 10, width_avg, curvature_avg * 10], dtype=np.float32),
-            np.array([float(collision), float(overtaking)], dtype=np.float32)
+            ego_state.flatten(),
+            opp_state.flatten(),
+            # stats_diff.flatten(),
+            opp_traj.flatten(),
+            track_info.flatten(),
+            # np.array([var_avg * 10, width_avg, curvature_avg * 10], dtype=np.float32),
+            np.array([float(mpc_solved), float(collision), float(overtaking)], dtype=np.float32)
+            # np.array([float(collision), float(overtaking)], dtype=np.float32)
         ])
         # print('state_vector:', state_vector)
 
@@ -571,7 +598,7 @@ def main():
     loaded_map = Track.from_track_path(map_yaml, scale)
 
     rl_name = 'qr_dqn'
-    training = False
+    training = True
     episode = 0
     ego_index = 0
 
@@ -612,10 +639,10 @@ def main():
     elif rl_name == 'sac':
         model = SAC.load("models/sac_f1tenth_model51")
     elif rl_name == 'qr_dqn':
-        model = QRDQN.load("models/qr_dqn_f1tenth_model382", env=env)
+        model = QRDQN.load("models/qr_dqn_f1tenth_model155", env=env)
 
     # obs, info = env.reset()
-    for ego_index in range(0, 11, 10):
+    for ego_index in range(0, 111, 10):
         env.ego_index = ego_index
         env.reset_count = 5
         obs, info = env.reset()
@@ -638,8 +665,8 @@ def main():
             else:
                 action = 2
 
-            # log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/8.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_ego.csv')
-            # log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/8.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_opp.csv')
+            log_to_csv(env.obs['poses_x'][0], env.obs['poses_y'][0], action, 'results/8.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_ego.csv')
+            log_to_csv(env.obs['poses_x'][1], env.obs['poses_y'][1], 0, 'results/8.5/SMPC_RL/' + rl_name + '_' + str(ego_index) + '_opp.csv')
 
             frame = env.render().copy()
             x_resolution, y_resolution = 0.046, 0.063
