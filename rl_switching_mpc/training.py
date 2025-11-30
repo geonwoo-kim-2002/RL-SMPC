@@ -236,7 +236,7 @@ class MyF1TenthEnv(gym.Env, Node):
     def step(self, action_value):
         # print("action:", action)
         action = int(action_value)
-        # action = 2
+        # action = 1
         # action_value = float(action_value[0])
         # if 0.0 <= action_value < 1.0:
         #     action = 0
@@ -309,6 +309,11 @@ class MyF1TenthEnv(gym.Env, Node):
 
         self.var_avg = max(min(self.var_avg, self.var_avg_max), self.var_avg_min)
         e_v = max(min(e_v, self.e_v_max), self.e_v_min)
+        if action == 1:
+            e_v -= 1.0
+        elif action == 2:
+            e_v += 1.0
+        e_v = max(min(e_v, self.e_v_max), self.e_v_min)
         reward += (exp(-pow(abs(self.var_avg - self.var_avg_min) / (self.var_avg_max - self.var_avg_min) * (self.e_v_max - self.e_v_min) - abs(-e_v + self.e_v_max), 2) / (2 * pow(1, 2)))) * 2 - 1
 
         if obs[-2] == 1.0:  # collision
@@ -321,8 +326,8 @@ class MyF1TenthEnv(gym.Env, Node):
             reward += (1 - (self.var_avg - self.var_avg_min) / (self.var_avg_max - self.var_avg_min)) * 1.0
             if self.training:
                 done = True
-        elif obs[-3] == 0.0:  # mpc not solved
-            reward -= 3.0
+        # elif obs[-3] == 0.0:  # mpc not solved
+        #     reward -= 3.0
 
         if action == 0:
             reward -= 3.0
@@ -524,6 +529,59 @@ class MyF1TenthEnv(gym.Env, Node):
     def render(self):
         return self.f1_env.render()
 
+class RewardLoggingCallbackFirst(BaseCallback):
+    def __init__(self, save_path="reward_history", rl_name='', verbose=0):
+        super().__init__(verbose)
+        self.save_path = save_path
+        self.rl_name = rl_name
+        self.episode_rewards = []
+        self.rewards = []
+        self.current_rewards = 0.0
+        self.step_count = 0
+
+    def _on_step(self) -> bool:
+        # 현재 스텝의 reward 저장
+        reward = self.locals.get("rewards")
+        done = self.locals.get("dones")
+        truncated = self.locals.get("truncations")
+
+        if reward is not None:
+            self.rewards.append(reward[0])
+            self.current_rewards += reward[0]
+            self.step_count += 1
+
+        print("done:", done, ", reward:", reward, ", step_count:", self.step_count)
+        if done is not None and done[0] and self.step_count > 20:
+            # 에피소드 종료 → 현재 reward 기록
+            self.episode_rewards.append(self.current_rewards / self.step_count if self.step_count > 0 else 0.0)
+            # if self.verbose > 0:
+            print(f"Episode {len(self.episode_rewards)} reward: {self.episode_rewards[-1]}")
+
+            self.current_rewards = 0.0
+            self.step_count = 0
+
+        if truncated is not None and truncated[0]:
+            self.current_rewards = 0.0
+            self.step_count = 0
+            print("Episode truncated. Resetting current rewards and step count.")
+
+        return True  # 계속 학습
+
+    def _on_training_end(self) -> None:
+        # 학습 종료 시 저장
+        curr_time = time.time()
+        episode_rewards_array = np.array(self.episode_rewards)
+        name = self.save_path + '_episode_' + self.rl_name + '_' + str(curr_time) + '.npy'
+        np.save(name, episode_rewards_array)
+
+        rewards_array = np.array(self.rewards)
+        name = self.save_path + '_' + self.rl_name + '_' + str(curr_time) + '.npy'
+        np.save(name, rewards_array)
+        # if self.verbose > 0:
+        print(f"Saved rewards to {name}, episode {len(self.episode_rewards)}, mean {np.mean(self.episode_rewards) if self.episode_rewards else 0.0}")
+        self.rewards = []
+        self.episode_rewards = []
+
 class RewardLoggingCallback(BaseCallback):
     def __init__(self, save_path="reward_history", rl_name='', verbose=0):
         super().__init__(verbose)
@@ -538,14 +596,15 @@ class RewardLoggingCallback(BaseCallback):
         # 현재 스텝의 reward 저장
         reward = self.locals.get("rewards")
         done = self.locals.get("dones")
+        truncated = self.locals.get("truncations")
 
         if reward is not None:
             self.rewards.append(reward[0])
             self.current_rewards += reward[0]
             self.step_count += 1
 
-        print("done:", done, ", reward:", reward)
-        if done is not None and done[0] and self.step_count > 20:
+        print("done:", done, ", reward:", reward, ", step_count:", self.step_count)
+        if done is not None and done[0] and self.step_count > 800:
             # 에피소드 종료 → 현재 reward 기록
             self.episode_rewards.append(self.current_rewards / self.step_count if self.step_count > 0 else 0.0)
             # if self.verbose > 0:
@@ -553,6 +612,11 @@ class RewardLoggingCallback(BaseCallback):
 
             self.current_rewards = 0.0
             self.step_count = 0
+
+        if truncated is not None and truncated[0]:
+            self.current_rewards = 0.0
+            self.step_count = 0
+            print("Episode truncated. Resetting current rewards and step count.")
 
         return True  # 계속 학습
 
@@ -603,7 +667,7 @@ def main():
     ego_index = 0
 
     env = MyF1TenthEnv(loaded_map, vehicle_params, path, training, ego_index)
-    reward_callback = RewardLoggingCallback(save_path="models/rewards", rl_name=rl_name, verbose=1)
+    reward_callback = RewardLoggingCallbackFirst(save_path="models/rewards", rl_name=rl_name, verbose=1)
 
     if training:
         if rl_name == 'dqn':
@@ -624,11 +688,13 @@ def main():
 
         # while episode <= 200:
         while True:
-            model.learn(total_timesteps=4096, callback=[reward_callback])
+            model.learn(total_timesteps=20000, callback=[reward_callback])
             model.save("models/" + rl_name + "_f1tenth_model" + str(episode))
             print("Model saved")
             episode += 1
             env.reset_count = 5
+            reward_callback = RewardLoggingCallback(save_path="models/rewards", rl_name=rl_name, verbose=1)
+
 
     if rl_name == 'dqn':
         model = DQN.load("models/dqn_f1tenth_model18")
